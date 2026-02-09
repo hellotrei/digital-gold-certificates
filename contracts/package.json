@@ -1,0 +1,16 @@
+{
+  "name": "@dgc/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "hardhat node",
+    "build": "hardhat compile",
+    "test": "hardhat test"
+  },
+  "devDependencies": {
+    "hardhat": "^3.0.0",
+    "@nomicfoundation/hardhat-toolbox": "^6.0.0",
+    "typescript": "^5.7.3",
+    "ts-node": "^10.9.2"
+  }
+}
