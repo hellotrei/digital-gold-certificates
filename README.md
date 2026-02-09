@@ -80,6 +80,52 @@ Run tests:
 pnpm -C contracts test
 ```
 
+## Milestone 1 (Current)
+
+Milestone 1 focuses on certificate lifecycle foundations without cross-service dependency:
+- Shared API contract types for issue/verify requests and responses.
+- `certificate-service` endpoints:
+  - `POST /certificates/issue`
+  - `POST /certificates/verify`
+  - `GET /certificates/:certId`
+- In-memory certificate storage for local prototyping.
+- Integration tests for issue/fetch/verify and tamper detection.
+
+## Run Milestone 1 On Localhost
+
+If `pnpm` is not installed globally, use `corepack pnpm`.
+
+```bash
+corepack pnpm install
+corepack pnpm -C packages/shared build
+corepack pnpm -C services/certificate-service dev
+```
+
+Service URL:
+- `http://127.0.0.1:4101`
+
+Issue certificate:
+
+```bash
+curl -X POST http://127.0.0.1:4101/certificates/issue \
+  -H "content-type: application/json" \
+  -d '{"owner":"0xabc999","amountGram":"1.0000","purity":"999.9","metadata":{"source":"localhost"}}'
+```
+
+Verify certificate:
+
+```bash
+curl -X POST http://127.0.0.1:4101/certificates/verify \
+  -H "content-type: application/json" \
+  -d '{"certId":"<CERT_ID_FROM_ISSUE_RESPONSE>"}'
+```
+
+Run tests:
+
+```bash
+corepack pnpm -C services/certificate-service test
+```
+
 ## Security Notes
 
 - Issuer keys should be managed with KMS/HSM in production.

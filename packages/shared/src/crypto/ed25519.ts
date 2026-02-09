@@ -9,3 +9,8 @@ export async function signHex(hashHex: string, privateKeyHex: string): Promise<s
 export async function verifyHex(hashHex: string, signatureHex: string, publicKeyHex: string): Promise<boolean> {
   return ed.verifyAsync(hexToBytes(signatureHex), hexToBytes(hashHex), hexToBytes(publicKeyHex));
 }
+
+export async function publicKeyFromPrivateKeyHex(privateKeyHex: string): Promise<string> {
+  const pub = await ed.getPublicKeyAsync(hexToBytes(privateKeyHex));
+  return bytesToHex(pub);
+}
