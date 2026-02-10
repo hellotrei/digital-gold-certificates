@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch --env-file=.env src/app.ts",
+    "dev": "tsx watch src/app.ts",
     "start": "node dist/app.js",
     "build": "tsc -p tsconfig.json",
     "lint": "eslint .",
@@ -12,9 +12,11 @@
   },
   "dependencies": {
     "@dgc/shared": "workspace:*",
+    "better-sqlite3": "^12.4.1",
     "fastify": "^4.28.1"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^24.3.0",
     "typescript": "^5.7.3",
     "tsx": "^4.19.2",

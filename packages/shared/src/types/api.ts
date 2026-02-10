@@ -1,5 +1,23 @@
 import type { SignedCertificate } from "./certificate.js";
 
+export interface ProofAnchorRecord {
+  certId: string;
+  payloadHash: string;
+  proofHash: string;
+  anchoredAt: string;
+  ledgerTxRef?: string;
+}
+
+export interface AnchorProofRequest {
+  certId: string;
+  payloadHash: string;
+  occurredAt: string;
+}
+
+export interface AnchorProofResponse {
+  proof: ProofAnchorRecord;
+}
+
 export interface IssueCertificateRequest {
   owner: string;
   amountGram: string;
@@ -9,6 +27,8 @@ export interface IssueCertificateRequest {
 
 export interface IssueCertificateResponse {
   certificate: SignedCertificate;
+  proof?: ProofAnchorRecord;
+  proofAnchorStatus: "ANCHORED" | "SKIPPED" | "FAILED";
 }
 
 export interface VerifyCertificateRequest {

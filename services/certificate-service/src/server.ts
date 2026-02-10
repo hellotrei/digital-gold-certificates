@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import Fastify from "fastify";
 import {
+  type AnchorProofResponse,
   canonicalJson,
+  type ProofAnchorRecord,
   publicKeyFromPrivateKeyHex,
   sha256Hex,
   signHex,
@@ -12,9 +14,15 @@ import {
   type VerifyCertificateRequest,
   type VerifyCertificateResponse,
 } from "@dgc/shared";
+import { buildOpenApiSpec } from "./openapi.js";
+import {
+  type CertificateStore,
+  SqliteCertificateStore,
+} from "./storage/certificate-store.js";
 
 const DEFAULT_ISSUER_PRIVATE_KEY_HEX =
   "1f1e1d1c1b1a19181716151413121110ffeeddbbccaa99887766554433221100";
+const DEFAULT_DB_PATH = "data/certificate-service.db";
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -60,14 +68,62 @@ function certIdNow(): string {
   return `DGC-${new Date().toISOString()}-${randomUUID().split("-")[0]}`;
 }
 
-export async function buildServer() {
+interface BuildServerOptions {
+  certificateStore?: CertificateStore;
+  dbPath?: string;
+  issuerPrivateKeyHex?: string;
+  ledgerAdapterUrl?: string;
+  serviceBaseUrl?: string;
+}
+
+async function tryAnchorProof(
+  ledgerAdapterUrl: string | undefined,
+  certId: string,
+  payloadHash: string,
+  occurredAt: string,
+): Promise<{ proofAnchorStatus: "ANCHORED" | "SKIPPED" | "FAILED"; proof?: ProofAnchorRecord }> {
+  if (!ledgerAdapterUrl) {
+    return { proofAnchorStatus: "SKIPPED" };
+  }
+
+  try {
+    const response = await fetch(`${ledgerAdapterUrl.replace(/\/$/, "")}/proofs/anchor`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ certId, payloadHash, occurredAt }),
+      signal: AbortSignal.timeout(5000),
+    });
+
+    if (!response.ok) {
+      return { proofAnchorStatus: "FAILED" };
+    }
+
+    const json = (await response.json()) as AnchorProofResponse;
+    return { proofAnchorStatus: "ANCHORED", proof: json.proof };
+  } catch {
+    return { proofAnchorStatus: "FAILED" };
+  }
+}
+
+export async function buildServer(options: BuildServerOptions = {}) {
   const app = Fastify({ logger: true });
-  const certStore = new Map<string, SignedCertificate>();
+  const certStore =
+    options.certificateStore ||
+    new SqliteCertificateStore(options.dbPath || process.env.CERT_DB_PATH || DEFAULT_DB_PATH);
+  const ownStore = !options.certificateStore;
   const issuerPrivateKeyHex =
-    process.env.ISSUER_PRIVATE_KEY_HEX || DEFAULT_ISSUER_PRIVATE_KEY_HEX;
+    options.issuerPrivateKeyHex ||
+    process.env.ISSUER_PRIVATE_KEY_HEX ||
+    DEFAULT_ISSUER_PRIVATE_KEY_HEX;
   const issuerPublicKeyHex = await publicKeyFromPrivateKeyHex(issuerPrivateKeyHex);
+  const ledgerAdapterUrl = options.ledgerAdapterUrl ?? process.env.LEDGER_ADAPTER_URL;
+  const serviceBaseUrl =
+    options.serviceBaseUrl ||
+    process.env.SERVICE_BASE_URL ||
+    `http://127.0.0.1:${process.env.PORT || 4101}`;
 
   app.get("/health", async () => ({ ok: true, service: "certificate-service" }));
+  app.get("/openapi.json", async () => buildOpenApiSpec(serviceBaseUrl));
 
   app.post("/certificates/issue", async (req, reply) => {
     const parsed = parseIssueRequest(req.body);
@@ -96,9 +152,20 @@ export async function buildServer() {
       payloadHash,
       signature,
     };
-    certStore.set(certificate.payload.certId, certificate);
+    certStore.put(certificate);
 
-    const response: IssueCertificateResponse = { certificate };
+    const proofResult = await tryAnchorProof(
+      ledgerAdapterUrl,
+      certificate.payload.certId,
+      certificate.payloadHash,
+      certificate.payload.issuedAt,
+    );
+
+    const response: IssueCertificateResponse = {
+      certificate,
+      proofAnchorStatus: proofResult.proofAnchorStatus,
+      proof: proofResult.proof,
+    };
     return reply.code(201).send(response);
   });
 
@@ -153,6 +220,12 @@ export async function buildServer() {
     };
 
     return reply.send(response);
+  });
+
+  app.addHook("onClose", async () => {
+    if (ownStore) {
+      certStore.close();
+    }
   });
 
   return app;

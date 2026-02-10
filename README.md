@@ -80,29 +80,44 @@ Run tests:
 pnpm -C contracts test
 ```
 
-## Milestone 1 (Current)
+## Milestone 2 (Current)
 
-Milestone 1 focuses on certificate lifecycle foundations without cross-service dependency:
-- Shared API contract types for issue/verify requests and responses.
-- `certificate-service` endpoints:
-  - `POST /certificates/issue`
-  - `POST /certificates/verify`
-  - `GET /certificates/:certId`
-- In-memory certificate storage for local prototyping.
-- Integration tests for issue/fetch/verify and tamper detection.
+Milestone 2 upgrades the starter into a modular local stack:
+- `certificate-service` persistence with SQLite (`CERT_DB_PATH`)
+- `certificate-service` OpenAPI endpoint: `GET /openapi.json`
+- `ledger-adapter` proof APIs:
+  - `POST /proofs/anchor`
+  - `GET /proofs/:certId`
+- Optional proof anchoring integration from `certificate-service` to `ledger-adapter` (`LEDGER_ADAPTER_URL`)
+- Integration tests for persistence and proof anchoring flow
 
-## Run Milestone 1 On Localhost
+## Run Milestone 2 On Localhost
 
 If `pnpm` is not installed globally, use `corepack pnpm`.
 
 ```bash
 corepack pnpm install
 corepack pnpm -C packages/shared build
+```
+
+Start ledger adapter:
+
+```bash
+PORT=4103 corepack pnpm -C services/ledger-adapter dev
+```
+
+Start certificate service (new terminal):
+
+```bash
+PORT=4101 \
+CERT_DB_PATH=./data/certificate-service.db \
+LEDGER_ADAPTER_URL=http://127.0.0.1:4103 \
 corepack pnpm -C services/certificate-service dev
 ```
 
-Service URL:
-- `http://127.0.0.1:4101`
+Service URLs:
+- `http://127.0.0.1:4101` (certificate-service)
+- `http://127.0.0.1:4103` (ledger-adapter)
 
 Issue certificate:
 
@@ -120,9 +135,22 @@ curl -X POST http://127.0.0.1:4101/certificates/verify \
   -d '{"certId":"<CERT_ID_FROM_ISSUE_RESPONSE>"}'
 ```
 
+Get anchored proof:
+
+```bash
+curl http://127.0.0.1:4103/proofs/<CERT_ID_FROM_ISSUE_RESPONSE>
+```
+
+OpenAPI:
+
+```bash
+curl http://127.0.0.1:4101/openapi.json
+```
+
 Run tests:
 
 ```bash
+corepack pnpm -C services/ledger-adapter test
 corepack pnpm -C services/certificate-service test
 ```
 
