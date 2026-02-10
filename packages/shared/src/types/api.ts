@@ -1,4 +1,5 @@
-import type { SignedCertificate } from "./certificate.js";
+import type { CertificateStatus, SignedCertificate } from "./certificate.js";
+import type { LedgerEvent } from "./events.js";
 
 export interface ProofAnchorRecord {
   certId: string;
@@ -29,6 +30,7 @@ export interface IssueCertificateResponse {
   certificate: SignedCertificate;
   proof?: ProofAnchorRecord;
   proofAnchorStatus: "ANCHORED" | "SKIPPED" | "FAILED";
+  eventWriteStatus: "RECORDED" | "SKIPPED" | "FAILED";
 }
 
 export interface VerifyCertificateRequest {
@@ -42,4 +44,59 @@ export interface VerifyCertificateResponse {
   hashMatches: boolean;
   signatureValid: boolean;
   status: string;
+}
+
+export interface TransferCertificateRequest {
+  certId: string;
+  toOwner: string;
+  price?: string;
+}
+
+export interface TransferCertificateResponse {
+  certificate: SignedCertificate;
+  proofAnchorStatus: "ANCHORED" | "SKIPPED" | "FAILED";
+  proof?: ProofAnchorRecord;
+  eventWriteStatus: "RECORDED" | "SKIPPED" | "FAILED";
+}
+
+export interface SplitCertificateRequest {
+  parentCertId: string;
+  toOwner: string;
+  amountChildGram: string;
+  price?: string;
+}
+
+export interface SplitCertificateResponse {
+  parentCertificate: SignedCertificate;
+  childCertificate: SignedCertificate;
+  proofAnchorStatus: "ANCHORED" | "SKIPPED" | "FAILED";
+  childProof?: ProofAnchorRecord;
+  parentProof?: ProofAnchorRecord;
+  eventWriteStatus: "RECORDED" | "SKIPPED" | "FAILED";
+}
+
+export interface ChangeCertificateStatusRequest {
+  certId: string;
+  status: CertificateStatus;
+}
+
+export interface ChangeCertificateStatusResponse {
+  certificate: SignedCertificate;
+  proofAnchorStatus: "ANCHORED" | "SKIPPED" | "FAILED";
+  proof?: ProofAnchorRecord;
+  eventWriteStatus: "RECORDED" | "SKIPPED" | "FAILED";
+}
+
+export interface RecordLedgerEventRequest {
+  event: LedgerEvent;
+}
+
+export interface RecordLedgerEventResponse {
+  event: LedgerEvent;
+  eventHash: string;
+}
+
+export interface GetTimelineResponse {
+  certId: string;
+  events: LedgerEvent[];
 }

@@ -80,18 +80,22 @@ Run tests:
 pnpm -C contracts test
 ```
 
-## Milestone 2 (Current)
+## Milestone 3 (Current)
 
-Milestone 2 upgrades the starter into a modular local stack:
-- `certificate-service` persistence with SQLite (`CERT_DB_PATH`)
-- `certificate-service` OpenAPI endpoint: `GET /openapi.json`
-- `ledger-adapter` proof APIs:
-  - `POST /proofs/anchor`
-  - `GET /proofs/:certId`
-- Optional proof anchoring integration from `certificate-service` to `ledger-adapter` (`LEDGER_ADAPTER_URL`)
-- Integration tests for persistence and proof anchoring flow
+Milestone 3 adds certificate mutation and timeline capabilities:
+- `certificate-service` new mutation APIs:
+  - `POST /certificates/transfer`
+  - `POST /certificates/split`
+  - `POST /certificates/status`
+- State machine enforcement for status transitions and mutation guards.
+- Timeline API:
+  - `GET /certificates/:certId/timeline`
+- `ledger-adapter` event APIs:
+  - `POST /events/record`
+  - `GET /events/:certId`
+- `web-verifier` now fetches real certificate, verify result, and timeline by `certId`.
 
-## Run Milestone 2 On Localhost
+## Run Milestone 3 On Localhost
 
 If `pnpm` is not installed globally, use `corepack pnpm`.
 
@@ -118,6 +122,7 @@ corepack pnpm -C services/certificate-service dev
 Service URLs:
 - `http://127.0.0.1:4101` (certificate-service)
 - `http://127.0.0.1:4103` (ledger-adapter)
+- `http://127.0.0.1:3000` (web-verifier)
 
 Issue certificate:
 
@@ -139,6 +144,42 @@ Get anchored proof:
 
 ```bash
 curl http://127.0.0.1:4103/proofs/<CERT_ID_FROM_ISSUE_RESPONSE>
+```
+
+Transfer certificate:
+
+```bash
+curl -X POST http://127.0.0.1:4101/certificates/transfer \
+  -H "content-type: application/json" \
+  -d '{"certId":"<CERT_ID>","toOwner":"0xnewowner","price":"1000.0000"}'
+```
+
+Split certificate:
+
+```bash
+curl -X POST http://127.0.0.1:4101/certificates/split \
+  -H "content-type: application/json" \
+  -d '{"parentCertId":"<CERT_ID>","toOwner":"0xchildowner","amountChildGram":"0.2500"}'
+```
+
+Change status:
+
+```bash
+curl -X POST http://127.0.0.1:4101/certificates/status \
+  -H "content-type: application/json" \
+  -d '{"certId":"<CERT_ID>","status":"LOCKED"}'
+```
+
+Read timeline:
+
+```bash
+curl http://127.0.0.1:4101/certificates/<CERT_ID>/timeline
+```
+
+Run verifier app:
+
+```bash
+CERTIFICATE_SERVICE_URL=http://127.0.0.1:4101 corepack pnpm -C apps/web-verifier dev
 ```
 
 OpenAPI:

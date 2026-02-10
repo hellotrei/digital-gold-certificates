@@ -48,3 +48,82 @@ test("rejects invalid anchor payload", async () => {
     await app.close();
   }
 });
+
+test("records and returns event timeline", async () => {
+  const app = await buildServer();
+  try {
+    const recordRes = await app.inject({
+      method: "POST",
+      url: "/events/record",
+      payload: {
+        event: {
+          type: "ISSUED",
+          certId: "DGC-TL-001",
+          occurredAt: "2026-02-10T10:00:00.000Z",
+          owner: "0xowner",
+          amountGram: "1.0000",
+          purity: "999.9",
+        },
+      },
+    });
+    assert.equal(recordRes.statusCode, 201);
+    const recordBody = recordRes.json() as { eventHash: string };
+    assert.equal(typeof recordBody.eventHash, "string");
+    assert.equal(recordBody.eventHash.length > 0, true);
+
+    const timelineRes = await app.inject({
+      method: "GET",
+      url: "/events/DGC-TL-001",
+    });
+    assert.equal(timelineRes.statusCode, 200);
+    const timelineBody = timelineRes.json() as {
+      certId: string;
+      events: Array<{ type: string }>;
+    };
+    assert.equal(timelineBody.certId, "DGC-TL-001");
+    assert.equal(timelineBody.events.length, 1);
+    assert.equal(timelineBody.events[0].type, "ISSUED");
+  } finally {
+    await app.close();
+  }
+});
+
+test("writes split event to parent and child timeline", async () => {
+  const app = await buildServer();
+  try {
+    const recordRes = await app.inject({
+      method: "POST",
+      url: "/events/record",
+      payload: {
+        event: {
+          type: "SPLIT",
+          certId: "DGC-PARENT-1",
+          parentCertId: "DGC-PARENT-1",
+          childCertId: "DGC-CHILD-1",
+          occurredAt: "2026-02-10T10:10:00.000Z",
+          from: "0xalice",
+          to: "0xbob",
+          amountChildGram: "0.2500",
+        },
+      },
+    });
+    assert.equal(recordRes.statusCode, 201);
+
+    const parentRes = await app.inject({
+      method: "GET",
+      url: "/events/DGC-PARENT-1",
+    });
+    const childRes = await app.inject({
+      method: "GET",
+      url: "/events/DGC-CHILD-1",
+    });
+    assert.equal(parentRes.statusCode, 200);
+    assert.equal(childRes.statusCode, 200);
+    const parentBody = parentRes.json() as { events: unknown[] };
+    const childBody = childRes.json() as { events: unknown[] };
+    assert.equal(parentBody.events.length, 1);
+    assert.equal(childBody.events.length, 1);
+  } finally {
+    await app.close();
+  }
+});
