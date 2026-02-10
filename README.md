@@ -170,6 +170,49 @@ curl -X POST http://127.0.0.1:4101/certificates/status \
   -d '{"certId":"<CERT_ID>","status":"LOCKED"}'
 ```
 
+Certificate status responses:
+
+- Valid status values: `ACTIVE`, `LOCKED`, `REDEEMED`, `REVOKED`
+- Allowed transitions:
+  - `ACTIVE -> LOCKED | REDEEMED | REVOKED`
+  - `LOCKED -> ACTIVE | REDEEMED | REVOKED`
+  - `REDEEMED` and `REVOKED` are terminal (cannot transition again)
+
+Success response (`200`):
+
+```json
+{
+  "certificate": {
+    "payload": {
+      "certId": "DGC-...",
+      "status": "LOCKED"
+    }
+  },
+  "proofAnchorStatus": "ANCHORED",
+  "proof": {
+    "proofHash": "..."
+  },
+  "eventWriteStatus": "RECORDED"
+}
+```
+
+Conflict response (`409`, invalid transition):
+
+```json
+{
+  "error": "state_conflict",
+  "message": "Transition REDEEMED -> ACTIVE is not allowed"
+}
+```
+
+Not found response (`404`):
+
+```json
+{
+  "error": "certificate_not_found"
+}
+```
+
 Read timeline:
 
 ```bash
