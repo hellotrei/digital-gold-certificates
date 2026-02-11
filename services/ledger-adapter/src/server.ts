@@ -10,6 +10,21 @@ import {
   type RecordLedgerEventRequest,
   type RecordLedgerEventResponse,
 } from "@dgc/shared";
+import {
+  buildChainWriterFromEnv,
+  type ChainStatusResult,
+  type ChainWriter,
+} from "./chain.js";
+
+interface BuildServerOptions {
+  chainWriter?: ChainWriter | null;
+}
+
+interface StoredEvent {
+  event: LedgerEvent;
+  eventHash: string;
+  ledgerTxRef?: string;
+}
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -69,12 +84,22 @@ function isRecordLedgerEventRequest(body: unknown): body is RecordLedgerEventReq
   return isLedgerEvent(body.event);
 }
 
-export async function buildServer() {
+export async function buildServer(options: BuildServerOptions = {}) {
   const app = Fastify({ logger: true });
   const proofStore = new Map<string, ProofAnchorRecord>();
-  const eventStore = new Map<string, LedgerEvent[]>();
+  const eventStore = new Map<string, StoredEvent[]>();
+  const chainWriter =
+    options.chainWriter === undefined ? buildChainWriterFromEnv() : options.chainWriter;
 
   app.get("/health", async () => ({ ok: true, service: "ledger-adapter" }));
+
+  app.get("/chain/status", async () => {
+    if (!chainWriter) {
+      const status: ChainStatusResult = { configured: false };
+      return status;
+    }
+    return chainWriter.status();
+  });
 
   app.post("/proofs/anchor", async (req, reply) => {
     if (!isAnchorProofRequest(req.body)) {
@@ -131,20 +156,36 @@ export async function buildServer() {
 
     const event = req.body.event;
     const eventHash = sha256Hex(canonicalJson(event));
+    let ledgerTxRef: string | undefined;
+
+    if (chainWriter) {
+      try {
+        const chainResult = await chainWriter.recordEvent(event);
+        ledgerTxRef = chainResult.txHash;
+      } catch (error) {
+        return reply.code(502).send({
+          error: "chain_write_failed",
+          message: error instanceof Error ? error.message : "unknown_error",
+        });
+      }
+    }
+
+    const record: StoredEvent = { event, eventHash, ledgerTxRef };
+
     const mainTimeline = eventStore.get(event.certId) || [];
-    mainTimeline.push(event);
+    mainTimeline.push(record);
     eventStore.set(event.certId, mainTimeline);
 
-    // Split events are relevant to both parent and child lineage.
     if (event.type === "SPLIT") {
       const childTimeline = eventStore.get(event.childCertId) || [];
-      childTimeline.push(event);
+      childTimeline.push(record);
       eventStore.set(event.childCertId, childTimeline);
     }
 
     const response: RecordLedgerEventResponse = {
       event,
       eventHash,
+      ledgerTxRef,
     };
     return reply.code(201).send(response);
   });
@@ -155,7 +196,8 @@ export async function buildServer() {
       return reply.code(400).send({ error: "invalid_cert_id" });
     }
 
-    const events = eventStore.get(params.certId) || [];
+    const records = eventStore.get(params.certId) || [];
+    const events = records.map((record) => record.event);
     const response: GetTimelineResponse = {
       certId: params.certId,
       events,

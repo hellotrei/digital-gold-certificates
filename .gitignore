@@ -12,3 +12,6 @@ data
 .DS_Store
 *.log
 pnpm-lock.yaml
+contracts/artifacts
+contracts/cache
+contracts/typechain-types

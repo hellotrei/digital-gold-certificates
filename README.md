@@ -80,37 +80,50 @@ Run tests:
 pnpm -C contracts test
 ```
 
-## Milestone 3 (Current)
+## Milestone 4 (Current)
 
-Milestone 3 adds certificate mutation and timeline capabilities:
-- `certificate-service` new mutation APIs:
-  - `POST /certificates/transfer`
-  - `POST /certificates/split`
-  - `POST /certificates/status`
-- State machine enforcement for status transitions and mutation guards.
-- Timeline API:
-  - `GET /certificates/:certId/timeline`
-- `ledger-adapter` event APIs:
-  - `POST /events/record`
-  - `GET /events/:certId`
-- `web-verifier` now fetches real certificate, verify result, and timeline by `certId`.
+Milestone 4 adds local-chain recording for ownership events:
+- `ledger-adapter` can write `ISSUED/TRANSFER/SPLIT/STATUS_CHANGED` events to `DGCRegistry` on local Hardhat chain.
+- `ledger-adapter` chain health endpoint:
+  - `GET /chain/status`
+- `ledger-adapter` event record response now includes:
+  - `ledgerTxRef` (transaction hash on chain) when chain is configured.
+- `certificate-service` continues to emit lifecycle events via `ledger-adapter` with same API contracts.
 
-## Run Milestone 3 On Localhost
+## Run Milestone 4 On Localhost (With Local Chain)
 
 If `pnpm` is not installed globally, use `corepack pnpm`.
 
 ```bash
 corepack pnpm install
 corepack pnpm -C packages/shared build
+corepack pnpm -C contracts build
 ```
 
-Start ledger adapter:
+Start local chain (terminal 1):
 
 ```bash
-PORT=4103 corepack pnpm -C services/ledger-adapter dev
+corepack pnpm -C contracts dev
 ```
 
-Start certificate service (new terminal):
+Deploy `DGCRegistry` (terminal 2):
+
+```bash
+corepack pnpm -C contracts deploy:local
+# output: DGC_REGISTRY_ADDRESS=0x...
+```
+
+Start ledger adapter with chain config (terminal 3):
+
+```bash
+PORT=4103 \
+CHAIN_RPC_URL=http://127.0.0.1:8545 \
+CHAIN_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
+DGC_REGISTRY_ADDRESS=<PASTE_DEPLOYED_ADDRESS> \
+corepack pnpm -C services/ledger-adapter dev
+```
+
+Start certificate service (terminal 4):
 
 ```bash
 PORT=4101 \
@@ -122,7 +135,14 @@ corepack pnpm -C services/certificate-service dev
 Service URLs:
 - `http://127.0.0.1:4101` (certificate-service)
 - `http://127.0.0.1:4103` (ledger-adapter)
+- `http://127.0.0.1:8545` (Hardhat local chain)
 - `http://127.0.0.1:3000` (web-verifier)
+
+Check chain connectivity from ledger-adapter:
+
+```bash
+curl http://127.0.0.1:4103/chain/status
+```
 
 Issue certificate:
 
@@ -144,6 +164,14 @@ Get anchored proof:
 
 ```bash
 curl http://127.0.0.1:4103/proofs/<CERT_ID_FROM_ISSUE_RESPONSE>
+```
+
+Record event directly (returns `ledgerTxRef` when chain is enabled):
+
+```bash
+curl -X POST http://127.0.0.1:4103/events/record \
+  -H "content-type: application/json" \
+  -d '{"event":{"type":"STATUS_CHANGED","certId":"<CERT_ID>","occurredAt":"2026-02-11T03:00:00.000Z","status":"LOCKED"}}'
 ```
 
 Transfer certificate:
@@ -234,6 +262,7 @@ curl http://127.0.0.1:4101/openapi.json
 Run tests:
 
 ```bash
+corepack pnpm -C contracts test
 corepack pnpm -C services/ledger-adapter test
 corepack pnpm -C services/certificate-service test
 ```

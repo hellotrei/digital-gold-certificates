@@ -127,3 +127,57 @@ test("writes split event to parent and child timeline", async () => {
     await app.close();
   }
 });
+
+test("returns configured false when chain is not set", async () => {
+  const app = await buildServer({ chainWriter: null });
+  try {
+    const res = await app.inject({
+      method: "GET",
+      url: "/chain/status",
+    });
+    assert.equal(res.statusCode, 200);
+    const body = res.json() as { configured: boolean };
+    assert.equal(body.configured, false);
+  } finally {
+    await app.close();
+  }
+});
+
+test("records event with chain tx ref when chain writer exists", async () => {
+  const app = await buildServer({
+    chainWriter: {
+      async recordEvent() {
+        return { txHash: "0xabc123" };
+      },
+      async status() {
+        return {
+          configured: true,
+          rpcUrl: "http://127.0.0.1:8545",
+          registryAddress: "0x0000000000000000000000000000000000000001",
+          latestBlock: 1,
+          signerAddress: "0x0000000000000000000000000000000000000002",
+        };
+      },
+    },
+  });
+
+  try {
+    const res = await app.inject({
+      method: "POST",
+      url: "/events/record",
+      payload: {
+        event: {
+          type: "STATUS_CHANGED",
+          certId: "DGC-CHAIN-001",
+          occurredAt: "2026-02-11T00:00:00.000Z",
+          status: "LOCKED",
+        },
+      },
+    });
+    assert.equal(res.statusCode, 201);
+    const body = res.json() as { ledgerTxRef?: string };
+    assert.equal(body.ledgerTxRef, "0xabc123");
+  } finally {
+    await app.close();
+  }
+});

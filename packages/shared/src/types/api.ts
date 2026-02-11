@@ -94,6 +94,7 @@ export interface RecordLedgerEventRequest {
 export interface RecordLedgerEventResponse {
   event: LedgerEvent;
   eventHash: string;
+  ledgerTxRef?: string;
 }
 
 export interface GetTimelineResponse {

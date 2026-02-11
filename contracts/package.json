@@ -5,10 +5,11 @@
   "scripts": {
     "dev": "hardhat node",
     "build": "hardhat compile",
-    "test": "hardhat test"
+    "test": "hardhat test",
+    "deploy:local": "hardhat run scripts/deploy-local.ts --network localhost"
   },
   "devDependencies": {
-    "hardhat": "^3.0.0",
+    "hardhat": "^2.26.3",
     "@nomicfoundation/hardhat-toolbox": "^6.0.0",
     "typescript": "^5.7.3",
     "ts-node": "^10.9.2"
