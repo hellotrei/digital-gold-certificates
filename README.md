@@ -80,17 +80,22 @@ Run tests:
 pnpm -C contracts test
 ```
 
-## Milestone 4 (Current)
+## Milestone 5 (Current)
 
-Milestone 4 adds local-chain recording for ownership events:
-- `ledger-adapter` can write `ISSUED/TRANSFER/SPLIT/STATUS_CHANGED` events to `DGCRegistry` on local Hardhat chain.
-- `ledger-adapter` chain health endpoint:
-  - `GET /chain/status`
-- `ledger-adapter` event record response now includes:
-  - `ledgerTxRef` (transaction hash on chain) when chain is configured.
-- `certificate-service` continues to emit lifecycle events via `ledger-adapter` with same API contracts.
+Milestone 5 adds marketplace backend flow (local-first):
+- `marketplace-service` endpoints:
+  - `POST /listings/create`
+  - `GET /listings/:listingId`
+  - `POST /escrow/lock`
+  - `POST /escrow/settle`
+  - `POST /escrow/cancel`
+- Escrow orchestration to `certificate-service`:
+  - `lock` moves certificate status to `LOCKED`
+  - `settle` unlocks to `ACTIVE`, then transfers ownership
+  - `cancel` on locked listing unlocks certificate back to `ACTIVE`
+- Milestone 4 local-chain behavior remains active through `ledger-adapter` + Hardhat localhost.
 
-## Run Milestone 4 On Localhost (With Local Chain)
+## Run Milestone 5 On Localhost (With Local Chain)
 
 If `pnpm` is not installed globally, use `corepack pnpm`.
 
@@ -132,8 +137,17 @@ LEDGER_ADAPTER_URL=http://127.0.0.1:4103 \
 corepack pnpm -C services/certificate-service dev
 ```
 
+Start marketplace service (terminal 5):
+
+```bash
+PORT=4102 \
+CERTIFICATE_SERVICE_URL=http://127.0.0.1:4101 \
+corepack pnpm -C services/marketplace-service dev
+```
+
 Service URLs:
 - `http://127.0.0.1:4101` (certificate-service)
+- `http://127.0.0.1:4102` (marketplace-service)
 - `http://127.0.0.1:4103` (ledger-adapter)
 - `http://127.0.0.1:8545` (Hardhat local chain)
 - `http://127.0.0.1:3000` (web-verifier)
@@ -196,6 +210,38 @@ Change status:
 curl -X POST http://127.0.0.1:4101/certificates/status \
   -H "content-type: application/json" \
   -d '{"certId":"<CERT_ID>","status":"LOCKED"}'
+```
+
+Create listing:
+
+```bash
+curl -X POST http://127.0.0.1:4102/listings/create \
+  -H "content-type: application/json" \
+  -d '{"certId":"<CERT_ID>","seller":"0xabc999","askPrice":"1200.0000"}'
+```
+
+Lock escrow:
+
+```bash
+curl -X POST http://127.0.0.1:4102/escrow/lock \
+  -H "content-type: application/json" \
+  -d '{"listingId":"<LISTING_ID>","buyer":"0xbuyer001"}'
+```
+
+Settle escrow:
+
+```bash
+curl -X POST http://127.0.0.1:4102/escrow/settle \
+  -H "content-type: application/json" \
+  -d '{"listingId":"<LISTING_ID>","buyer":"0xbuyer001","settledPrice":"1195.0000"}'
+```
+
+Cancel escrow:
+
+```bash
+curl -X POST http://127.0.0.1:4102/escrow/cancel \
+  -H "content-type: application/json" \
+  -d '{"listingId":"<LISTING_ID>","reason":"buyer_timeout"}'
 ```
 
 Certificate status responses:
@@ -263,6 +309,7 @@ Run tests:
 
 ```bash
 corepack pnpm -C contracts test
+corepack pnpm -C services/marketplace-service test
 corepack pnpm -C services/ledger-adapter test
 corepack pnpm -C services/certificate-service test
 ```

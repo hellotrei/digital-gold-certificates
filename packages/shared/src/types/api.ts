@@ -87,6 +87,67 @@ export interface ChangeCertificateStatusResponse {
   eventWriteStatus: "RECORDED" | "SKIPPED" | "FAILED";
 }
 
+export type ListingStatus = "OPEN" | "LOCKED" | "SETTLED" | "CANCELLED";
+
+export interface MarketplaceListing {
+  listingId: string;
+  certId: string;
+  seller: string;
+  askPrice: string;
+  status: ListingStatus;
+  createdAt: string;
+  updatedAt: string;
+  lockedBy?: string;
+  lockedAt?: string;
+  settledAt?: string;
+  settledPrice?: string;
+  cancelledAt?: string;
+  cancelReason?: string;
+}
+
+export interface CreateListingRequest {
+  certId: string;
+  seller: string;
+  askPrice: string;
+}
+
+export interface CreateListingResponse {
+  listing: MarketplaceListing;
+}
+
+export interface GetListingResponse {
+  listing: MarketplaceListing;
+}
+
+export interface LockEscrowRequest {
+  listingId: string;
+  buyer: string;
+}
+
+export interface LockEscrowResponse {
+  listing: MarketplaceListing;
+}
+
+export interface SettleEscrowRequest {
+  listingId: string;
+  buyer: string;
+  settledPrice?: string;
+}
+
+export interface SettleEscrowResponse {
+  listing: MarketplaceListing;
+  transfer: TransferCertificateResponse;
+}
+
+export interface CancelEscrowRequest {
+  listingId: string;
+  reason?: string;
+}
+
+export interface CancelEscrowResponse {
+  listing: MarketplaceListing;
+}
+
 export interface RecordLedgerEventRequest {
   event: LedgerEvent;
 }
