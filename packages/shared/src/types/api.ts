@@ -88,6 +88,7 @@ export interface ChangeCertificateStatusResponse {
 }
 
 export type ListingStatus = "OPEN" | "LOCKED" | "SETTLED" | "CANCELLED";
+export type ListingAuditEventType = "CREATED" | "LOCKED" | "SETTLED" | "CANCELLED";
 
 export interface MarketplaceListing {
   listingId: string;
@@ -105,6 +106,15 @@ export interface MarketplaceListing {
   cancelReason?: string;
 }
 
+export interface ListingAuditEvent {
+  eventId: string;
+  listingId: string;
+  type: ListingAuditEventType;
+  actor?: string;
+  occurredAt: string;
+  details?: Record<string, unknown>;
+}
+
 export interface CreateListingRequest {
   certId: string;
   seller: string;
@@ -117,6 +127,15 @@ export interface CreateListingResponse {
 
 export interface GetListingResponse {
   listing: MarketplaceListing;
+}
+
+export interface ListListingsResponse {
+  listings: MarketplaceListing[];
+}
+
+export interface GetListingAuditResponse {
+  listingId: string;
+  events: ListingAuditEvent[];
 }
 
 export interface LockEscrowRequest {

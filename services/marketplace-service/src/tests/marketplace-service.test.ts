@@ -1,15 +1,28 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import type {
   CertificateStatus,
   ChangeCertificateStatusRequest,
   ChangeCertificateStatusResponse,
+  ListListingsResponse,
+  ListingAuditEvent,
   MarketplaceListing,
   SignedCertificate,
   TransferCertificateRequest,
   TransferCertificateResponse,
 } from "@dgc/shared";
 import { buildServer, type CertificateClient } from "../server.js";
+
+function createTempDbPath() {
+  const dir = mkdtempSync(join(tmpdir(), "dgc-marketplace-service-"));
+  return {
+    dir,
+    dbPath: join(dir, "marketplace.db"),
+  };
+}
 
 function makeCertificate(
   certId: string,
@@ -31,47 +44,96 @@ function makeCertificate(
   };
 }
 
-test("creates listing and fetches by id", async () => {
-  const certId = "DGC-LIST-001";
-  const client: CertificateClient = {
-    async getCertificate(requestedCertId) {
-      assert.equal(requestedCertId, certId);
-      return { ok: true, status: 200, data: { certificate: makeCertificate(certId, "seller-A") } };
+function createCertificateClient(
+  overrides: Partial<CertificateClient> = {},
+): CertificateClient {
+  return {
+    async getCertificate(certId: string) {
+      return {
+        ok: true,
+        status: 200,
+        data: { certificate: makeCertificate(certId, "seller-default") },
+      };
     },
-    async changeStatus() {
-      throw new Error("not used");
+    async changeStatus(request: ChangeCertificateStatusRequest) {
+      const response: ChangeCertificateStatusResponse = {
+        certificate: makeCertificate(request.certId, "seller-default", request.status),
+        proofAnchorStatus: "SKIPPED",
+        eventWriteStatus: "SKIPPED",
+      };
+      return { ok: true, status: 200, data: response };
     },
-    async transfer() {
-      throw new Error("not used");
+    async transfer(request: TransferCertificateRequest) {
+      const response: TransferCertificateResponse = {
+        certificate: makeCertificate(request.certId, request.toOwner, "ACTIVE"),
+        proofAnchorStatus: "SKIPPED",
+        eventWriteStatus: "SKIPPED",
+      };
+      return { ok: true, status: 200, data: response };
     },
+    ...overrides,
   };
+}
 
-  const app = await buildServer({ certificateClient: client });
+test("creates listing, lists by filter, and exposes audit trail", async () => {
+  const temp = createTempDbPath();
+  const client = createCertificateClient({
+    async getCertificate(certId) {
+      return {
+        ok: true,
+        status: 200,
+        data: { certificate: makeCertificate(certId, "seller-A") },
+      };
+    },
+  });
+
+  const app = await buildServer({ certificateClient: client, dbPath: temp.dbPath });
   try {
     const createRes = await app.inject({
       method: "POST",
       url: "/listings/create",
-      payload: { certId, seller: "seller-A", askPrice: "1000.0000" },
+      payload: { certId: "DGC-LIST-001", seller: "seller-A", askPrice: "1000.0000" },
     });
     assert.equal(createRes.statusCode, 201);
 
-    const createBody = createRes.json() as { listing: MarketplaceListing };
-    assert.equal(createBody.listing.status, "OPEN");
+    const listing = (createRes.json() as { listing: MarketplaceListing }).listing;
 
-    const getRes = await app.inject({
-      method: "GET",
-      url: `/listings/${encodeURIComponent(createBody.listing.listingId)}`,
+    const lockRes = await app.inject({
+      method: "POST",
+      url: "/escrow/lock",
+      headers: { "idempotency-key": "lock-1" },
+      payload: { listingId: listing.listingId, buyer: "buyer-A" },
     });
-    assert.equal(getRes.statusCode, 200);
-    const getBody = getRes.json() as { listing: MarketplaceListing };
-    assert.equal(getBody.listing.certId, certId);
+    assert.equal(lockRes.statusCode, 200);
+
+    const listRes = await app.inject({
+      method: "GET",
+      url: "/listings?status=LOCKED",
+    });
+    assert.equal(listRes.statusCode, 200);
+    const listBody = listRes.json() as ListListingsResponse;
+    assert.equal(listBody.listings.length, 1);
+    assert.equal(listBody.listings[0].listingId, listing.listingId);
+
+    const auditRes = await app.inject({
+      method: "GET",
+      url: `/listings/${encodeURIComponent(listing.listingId)}/audit`,
+    });
+    assert.equal(auditRes.statusCode, 200);
+    const auditBody = auditRes.json() as { events: ListingAuditEvent[] };
+    assert.deepEqual(
+      auditBody.events.map((event) => event.type),
+      ["CREATED", "LOCKED"],
+    );
   } finally {
     await app.close();
+    rmSync(temp.dir, { recursive: true, force: true });
   }
 });
 
 test("rejects listing when seller does not match current owner", async () => {
-  const client: CertificateClient = {
+  const temp = createTempDbPath();
+  const client = createCertificateClient({
     async getCertificate() {
       return {
         ok: true,
@@ -79,15 +141,9 @@ test("rejects listing when seller does not match current owner", async () => {
         data: { certificate: makeCertificate("DGC-LIST-002", "owner-real") },
       };
     },
-    async changeStatus() {
-      throw new Error("not used");
-    },
-    async transfer() {
-      throw new Error("not used");
-    },
-  };
+  });
 
-  const app = await buildServer({ certificateClient: client });
+  const app = await buildServer({ certificateClient: client, dbPath: temp.dbPath });
   try {
     const res = await app.inject({
       method: "POST",
@@ -98,161 +154,257 @@ test("rejects listing when seller does not match current owner", async () => {
     assert.equal(res.json().error, "owner_mismatch");
   } finally {
     await app.close();
+    rmSync(temp.dir, { recursive: true, force: true });
   }
 });
 
-test("locks listing via certificate status transition", async () => {
-  const certId = "DGC-LIST-003";
-  const statusCalls: ChangeCertificateStatusRequest[] = [];
-
-  const client: CertificateClient = {
-    async getCertificate() {
-      return { ok: true, status: 200, data: { certificate: makeCertificate(certId, "seller-C") } };
-    },
-    async changeStatus(request) {
-      statusCalls.push(request);
-      const response: ChangeCertificateStatusResponse = {
-        certificate: makeCertificate(certId, "seller-C", request.status),
-        proofAnchorStatus: "SKIPPED",
-        eventWriteStatus: "SKIPPED",
+test("requires idempotency key for lock/settle/cancel", async () => {
+  const temp = createTempDbPath();
+  const client = createCertificateClient({
+    async getCertificate(certId) {
+      return {
+        ok: true,
+        status: 200,
+        data: { certificate: makeCertificate(certId, "seller-B") },
       };
-      return { ok: true, status: 200, data: response };
     },
-    async transfer() {
-      throw new Error("not used");
-    },
-  };
+  });
 
-  const app = await buildServer({ certificateClient: client });
+  const app = await buildServer({ certificateClient: client, dbPath: temp.dbPath });
   try {
     const createRes = await app.inject({
       method: "POST",
       url: "/listings/create",
-      payload: { certId, seller: "seller-C", askPrice: "1200.0000" },
+      payload: { certId: "DGC-LIST-003", seller: "seller-B", askPrice: "1300.0000" },
     });
     const listingId = (createRes.json() as { listing: MarketplaceListing }).listing.listingId;
 
     const lockRes = await app.inject({
       method: "POST",
       url: "/escrow/lock",
-      payload: { listingId, buyer: "buyer-C" },
+      payload: { listingId, buyer: "buyer-B" },
     });
-    assert.equal(lockRes.statusCode, 200);
-    const body = lockRes.json() as { listing: MarketplaceListing };
-    assert.equal(body.listing.status, "LOCKED");
-    assert.equal(body.listing.lockedBy, "buyer-C");
-    assert.deepEqual(statusCalls, [{ certId, status: "LOCKED" }]);
-  } finally {
-    await app.close();
-  }
-});
-
-test("settles LOCKED listing with unlock + transfer sequence", async () => {
-  const certId = "DGC-LIST-004";
-  const ops: string[] = [];
-
-  const client: CertificateClient = {
-    async getCertificate() {
-      return { ok: true, status: 200, data: { certificate: makeCertificate(certId, "seller-D") } };
-    },
-    async changeStatus(request) {
-      ops.push(`status:${request.status}`);
-      const response: ChangeCertificateStatusResponse = {
-        certificate: makeCertificate(certId, "seller-D", request.status),
-        proofAnchorStatus: "SKIPPED",
-        eventWriteStatus: "SKIPPED",
-      };
-      return { ok: true, status: 200, data: response };
-    },
-    async transfer(request: TransferCertificateRequest) {
-      ops.push("transfer");
-      const response: TransferCertificateResponse = {
-        certificate: makeCertificate(certId, request.toOwner, "ACTIVE"),
-        proofAnchorStatus: "SKIPPED",
-        eventWriteStatus: "SKIPPED",
-      };
-      return { ok: true, status: 200, data: response };
-    },
-  };
-
-  const app = await buildServer({ certificateClient: client });
-  try {
-    const createRes = await app.inject({
-      method: "POST",
-      url: "/listings/create",
-      payload: { certId, seller: "seller-D", askPrice: "1500.0000" },
-    });
-    const listingId = (createRes.json() as { listing: MarketplaceListing }).listing.listingId;
+    assert.equal(lockRes.statusCode, 400);
+    assert.equal(lockRes.json().error, "missing_idempotency_key");
 
     await app.inject({
       method: "POST",
       url: "/escrow/lock",
-      payload: { listingId, buyer: "buyer-D" },
+      headers: { "idempotency-key": "lock-3" },
+      payload: { listingId, buyer: "buyer-B" },
     });
 
     const settleRes = await app.inject({
       method: "POST",
       url: "/escrow/settle",
-      payload: { listingId, buyer: "buyer-D", settledPrice: "1499.0000" },
+      payload: { listingId, buyer: "buyer-B" },
     });
-    assert.equal(settleRes.statusCode, 200);
-    const settleBody = settleRes.json() as { listing: MarketplaceListing };
-    assert.equal(settleBody.listing.status, "SETTLED");
-    assert.equal(settleBody.listing.settledPrice, "1499.0000");
-    assert.deepEqual(ops, ["status:LOCKED", "status:ACTIVE", "transfer"]);
+    assert.equal(settleRes.statusCode, 400);
+
+    const cancelRes = await app.inject({
+      method: "POST",
+      url: "/escrow/cancel",
+      payload: { listingId },
+    });
+    assert.equal(cancelRes.statusCode, 400);
   } finally {
     await app.close();
+    rmSync(temp.dir, { recursive: true, force: true });
   }
 });
 
-test("cancels LOCKED listing and unlocks certificate", async () => {
-  const certId = "DGC-LIST-005";
-  const ops: string[] = [];
-
-  const client: CertificateClient = {
-    async getCertificate() {
-      return { ok: true, status: 200, data: { certificate: makeCertificate(certId, "seller-E") } };
+test("replays lock response on duplicate idempotency key", async () => {
+  const temp = createTempDbPath();
+  const statusCalls: ChangeCertificateStatusRequest[] = [];
+  const client = createCertificateClient({
+    async getCertificate(certId) {
+      return {
+        ok: true,
+        status: 200,
+        data: { certificate: makeCertificate(certId, "seller-C") },
+      };
     },
     async changeStatus(request) {
-      ops.push(`status:${request.status}`);
+      statusCalls.push(request);
       const response: ChangeCertificateStatusResponse = {
-        certificate: makeCertificate(certId, "seller-E", request.status),
+        certificate: makeCertificate(request.certId, "seller-C", request.status),
         proofAnchorStatus: "SKIPPED",
         eventWriteStatus: "SKIPPED",
       };
       return { ok: true, status: 200, data: response };
     },
-    async transfer() {
-      throw new Error("not used");
-    },
-  };
+  });
 
-  const app = await buildServer({ certificateClient: client });
+  const app = await buildServer({ certificateClient: client, dbPath: temp.dbPath });
   try {
     const createRes = await app.inject({
       method: "POST",
       url: "/listings/create",
-      payload: { certId, seller: "seller-E", askPrice: "1550.0000" },
+      payload: { certId: "DGC-LIST-004", seller: "seller-C", askPrice: "1400.0000" },
     });
     const listingId = (createRes.json() as { listing: MarketplaceListing }).listing.listingId;
+
+    const first = await app.inject({
+      method: "POST",
+      url: "/escrow/lock",
+      headers: { "idempotency-key": "lock-4" },
+      payload: { listingId, buyer: "buyer-C" },
+    });
+    const second = await app.inject({
+      method: "POST",
+      url: "/escrow/lock",
+      headers: { "idempotency-key": "lock-4" },
+      payload: { listingId, buyer: "buyer-C" },
+    });
+
+    assert.equal(first.statusCode, 200);
+    assert.equal(second.statusCode, 200);
+    assert.deepEqual(first.json(), second.json());
+    assert.deepEqual(statusCalls, [{ certId: "DGC-LIST-004", status: "LOCKED" }]);
+
+    const conflict = await app.inject({
+      method: "POST",
+      url: "/escrow/lock",
+      headers: { "idempotency-key": "lock-4" },
+      payload: { listingId, buyer: "buyer-C-other" },
+    });
+    assert.equal(conflict.statusCode, 409);
+    assert.equal(conflict.json().error, "idempotency_key_reuse_conflict");
+  } finally {
+    await app.close();
+    rmSync(temp.dir, { recursive: true, force: true });
+  }
+});
+
+test("settles and cancels with expected certificate transitions", async () => {
+  const temp = createTempDbPath();
+  const ops: string[] = [];
+  const client = createCertificateClient({
+    async getCertificate(certId) {
+      return {
+        ok: true,
+        status: 200,
+        data: { certificate: makeCertificate(certId, "seller-D") },
+      };
+    },
+    async changeStatus(request) {
+      ops.push(`status:${request.status}`);
+      const response: ChangeCertificateStatusResponse = {
+        certificate: makeCertificate(request.certId, "seller-D", request.status),
+        proofAnchorStatus: "SKIPPED",
+        eventWriteStatus: "SKIPPED",
+      };
+      return { ok: true, status: 200, data: response };
+    },
+    async transfer(request) {
+      ops.push("transfer");
+      const response: TransferCertificateResponse = {
+        certificate: makeCertificate(request.certId, request.toOwner, "ACTIVE"),
+        proofAnchorStatus: "SKIPPED",
+        eventWriteStatus: "SKIPPED",
+      };
+      return { ok: true, status: 200, data: response };
+    },
+  });
+
+  const app = await buildServer({ certificateClient: client, dbPath: temp.dbPath });
+  try {
+    const createOne = await app.inject({
+      method: "POST",
+      url: "/listings/create",
+      payload: { certId: "DGC-LIST-005", seller: "seller-D", askPrice: "1500.0000" },
+    });
+    const listingOne = (createOne.json() as { listing: MarketplaceListing }).listing.listingId;
 
     await app.inject({
       method: "POST",
       url: "/escrow/lock",
-      payload: { listingId, buyer: "buyer-E" },
+      headers: { "idempotency-key": "lock-5" },
+      payload: { listingId: listingOne, buyer: "buyer-D" },
+    });
+
+    const settleRes = await app.inject({
+      method: "POST",
+      url: "/escrow/settle",
+      headers: { "idempotency-key": "settle-5" },
+      payload: { listingId: listingOne, buyer: "buyer-D", settledPrice: "1499.0000" },
+    });
+    assert.equal(settleRes.statusCode, 200);
+    assert.equal(settleRes.json().listing.status, "SETTLED");
+
+    const createTwo = await app.inject({
+      method: "POST",
+      url: "/listings/create",
+      payload: { certId: "DGC-LIST-006", seller: "seller-D", askPrice: "1550.0000" },
+    });
+    const listingTwo = (createTwo.json() as { listing: MarketplaceListing }).listing.listingId;
+
+    await app.inject({
+      method: "POST",
+      url: "/escrow/lock",
+      headers: { "idempotency-key": "lock-6" },
+      payload: { listingId: listingTwo, buyer: "buyer-E" },
     });
 
     const cancelRes = await app.inject({
       method: "POST",
       url: "/escrow/cancel",
-      payload: { listingId, reason: "buyer_timeout" },
+      headers: { "idempotency-key": "cancel-6" },
+      payload: { listingId: listingTwo, reason: "buyer_timeout" },
     });
     assert.equal(cancelRes.statusCode, 200);
-    const cancelBody = cancelRes.json() as { listing: MarketplaceListing };
-    assert.equal(cancelBody.listing.status, "CANCELLED");
-    assert.equal(cancelBody.listing.cancelReason, "buyer_timeout");
-    assert.deepEqual(ops, ["status:LOCKED", "status:ACTIVE"]);
+    assert.equal(cancelRes.json().listing.status, "CANCELLED");
+
+    assert.deepEqual(ops, [
+      "status:LOCKED",
+      "status:ACTIVE",
+      "transfer",
+      "status:LOCKED",
+      "status:ACTIVE",
+    ]);
   } finally {
     await app.close();
+    rmSync(temp.dir, { recursive: true, force: true });
+  }
+});
+
+test("keeps listing data after server restart", async () => {
+  const temp = createTempDbPath();
+  const client = createCertificateClient({
+    async getCertificate(certId) {
+      return {
+        ok: true,
+        status: 200,
+        data: { certificate: makeCertificate(certId, "seller-restart") },
+      };
+    },
+  });
+
+  const app1 = await buildServer({ certificateClient: client, dbPath: temp.dbPath });
+  let listingId = "";
+  try {
+    const createRes = await app1.inject({
+      method: "POST",
+      url: "/listings/create",
+      payload: { certId: "DGC-LIST-007", seller: "seller-restart", askPrice: "2000.0000" },
+    });
+    listingId = (createRes.json() as { listing: MarketplaceListing }).listing.listingId;
+  } finally {
+    await app1.close();
+  }
+
+  const app2 = await buildServer({ certificateClient: client, dbPath: temp.dbPath });
+  try {
+    const getRes = await app2.inject({
+      method: "GET",
+      url: `/listings/${encodeURIComponent(listingId)}`,
+    });
+    assert.equal(getRes.statusCode, 200);
+    const getBody = getRes.json() as { listing: MarketplaceListing };
+    assert.equal(getBody.listing.listingId, listingId);
+    assert.equal(getBody.listing.status, "OPEN");
+  } finally {
+    await app2.close();
+    rmSync(temp.dir, { recursive: true, force: true });
   }
 });

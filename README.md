@@ -80,22 +80,29 @@ Run tests:
 pnpm -C contracts test
 ```
 
-## Milestone 5 (Current)
+## Milestone 6 (Current)
 
-Milestone 5 adds marketplace backend flow (local-first):
+Milestone 6 hardens marketplace backend flow (local-first):
 - `marketplace-service` endpoints:
+  - `GET /listings?status=OPEN|LOCKED|SETTLED|CANCELLED`
   - `POST /listings/create`
+  - `GET /listings/:listingId/audit`
   - `GET /listings/:listingId`
   - `POST /escrow/lock`
   - `POST /escrow/settle`
   - `POST /escrow/cancel`
+- `marketplace-service` now uses SQLite persistence (`MARKETPLACE_DB_PATH`) so data survives restart.
+- Escrow operations (`lock/settle/cancel`) now require `Idempotency-Key` request header.
+- Audit trail is stored per listing (`CREATED`, `LOCKED`, `SETTLED`, `CANCELLED`).
 - Escrow orchestration to `certificate-service`:
   - `lock` moves certificate status to `LOCKED`
   - `settle` unlocks to `ACTIVE`, then transfers ownership
   - `cancel` on locked listing unlocks certificate back to `ACTIVE`
-- Milestone 4 local-chain behavior remains active through `ledger-adapter` + Hardhat localhost.
+- Hardcoded private keys removed from runtime defaults:
+  - `ISSUER_PRIVATE_KEY_HEX` must be set for `certificate-service`
+  - `CHAIN_PRIVATE_KEY` must be set when `DGC_REGISTRY_ADDRESS` is enabled in `ledger-adapter`
 
-## Run Milestone 5 On Localhost (With Local Chain)
+## Run Milestone 6 On Localhost (With Local Chain)
 
 If `pnpm` is not installed globally, use `corepack pnpm`.
 
@@ -118,12 +125,19 @@ corepack pnpm -C contracts deploy:local
 # output: DGC_REGISTRY_ADDRESS=0x...
 ```
 
+Prepare environment keys (terminal 3):
+
+```bash
+export ISSUER_PRIVATE_KEY_HEX="$(openssl rand -hex 32)"
+export CHAIN_PRIVATE_KEY="<YOUR_LOCAL_CHAIN_PRIVATE_KEY>"
+```
+
 Start ledger adapter with chain config (terminal 3):
 
 ```bash
 PORT=4103 \
 CHAIN_RPC_URL=http://127.0.0.1:8545 \
-CHAIN_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
+CHAIN_PRIVATE_KEY=<YOUR_LOCAL_CHAIN_PRIVATE_KEY> \
 DGC_REGISTRY_ADDRESS=<PASTE_DEPLOYED_ADDRESS> \
 corepack pnpm -C services/ledger-adapter dev
 ```
@@ -132,6 +146,7 @@ Start certificate service (terminal 4):
 
 ```bash
 PORT=4101 \
+ISSUER_PRIVATE_KEY_HEX=<YOUR_ISSUER_PRIVATE_KEY_HEX> \
 CERT_DB_PATH=./data/certificate-service.db \
 LEDGER_ADAPTER_URL=http://127.0.0.1:4103 \
 corepack pnpm -C services/certificate-service dev
@@ -142,6 +157,7 @@ Start marketplace service (terminal 5):
 ```bash
 PORT=4102 \
 CERTIFICATE_SERVICE_URL=http://127.0.0.1:4101 \
+MARKETPLACE_DB_PATH=./data/marketplace-service.db \
 corepack pnpm -C services/marketplace-service dev
 ```
 
@@ -224,6 +240,7 @@ Lock escrow:
 
 ```bash
 curl -X POST http://127.0.0.1:4102/escrow/lock \
+  -H "idempotency-key: lock-001" \
   -H "content-type: application/json" \
   -d '{"listingId":"<LISTING_ID>","buyer":"0xbuyer001"}'
 ```
@@ -232,6 +249,7 @@ Settle escrow:
 
 ```bash
 curl -X POST http://127.0.0.1:4102/escrow/settle \
+  -H "idempotency-key: settle-001" \
   -H "content-type: application/json" \
   -d '{"listingId":"<LISTING_ID>","buyer":"0xbuyer001","settledPrice":"1195.0000"}'
 ```
@@ -240,8 +258,21 @@ Cancel escrow:
 
 ```bash
 curl -X POST http://127.0.0.1:4102/escrow/cancel \
+  -H "idempotency-key: cancel-001" \
   -H "content-type: application/json" \
   -d '{"listingId":"<LISTING_ID>","reason":"buyer_timeout"}'
+```
+
+List listings by status:
+
+```bash
+curl "http://127.0.0.1:4102/listings?status=OPEN"
+```
+
+Get listing audit trail:
+
+```bash
+curl http://127.0.0.1:4102/listings/<LISTING_ID>/audit
 ```
 
 Certificate status responses:

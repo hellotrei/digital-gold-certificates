@@ -18,8 +18,6 @@ const DGC_REGISTRY_ABI = [
 
 const AMOUNT_SCALE = 10000n;
 const DEFAULT_CHAIN_RPC_URL = "http://127.0.0.1:8545";
-const DEFAULT_LOCAL_CHAIN_PRIVATE_KEY =
-  "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
 export interface ChainRecordResult {
   txHash: string;
@@ -156,7 +154,11 @@ export function buildChainWriterFromEnv(): ChainWriter | null {
   if (!registryAddress) return null;
 
   const rpcUrl = process.env.CHAIN_RPC_URL || DEFAULT_CHAIN_RPC_URL;
-  const privateKey =
-    process.env.CHAIN_PRIVATE_KEY || DEFAULT_LOCAL_CHAIN_PRIVATE_KEY;
+  const privateKey = process.env.CHAIN_PRIVATE_KEY;
+  if (!privateKey) {
+    throw new Error(
+      "CHAIN_PRIVATE_KEY is required when DGC_REGISTRY_ADDRESS is set",
+    );
+  }
   return new DgcRegistryChainWriter(rpcUrl, privateKey, registryAddress);
 }

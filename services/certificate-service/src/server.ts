@@ -29,8 +29,6 @@ import {
   SqliteCertificateStore,
 } from "./storage/certificate-store.js";
 
-const DEFAULT_ISSUER_PRIVATE_KEY_HEX =
-  "1f1e1d1c1b1a19181716151413121110ffeeddbbccaa99887766554433221100";
 const DEFAULT_DB_PATH = "data/certificate-service.db";
 const AMOUNT_SCALE = 10000n;
 
@@ -225,8 +223,12 @@ export async function buildServer(options: BuildServerOptions = {}) {
   const ownStore = !options.certificateStore;
   const issuerPrivateKeyHex =
     options.issuerPrivateKeyHex ||
-    process.env.ISSUER_PRIVATE_KEY_HEX ||
-    DEFAULT_ISSUER_PRIVATE_KEY_HEX;
+    process.env.ISSUER_PRIVATE_KEY_HEX;
+  if (!issuerPrivateKeyHex) {
+    throw new Error(
+      "ISSUER_PRIVATE_KEY_HEX is required (or pass issuerPrivateKeyHex in buildServer options)",
+    );
+  }
   const issuerPublicKeyHex = await publicKeyFromPrivateKeyHex(issuerPrivateKeyHex);
   const ledgerAdapterUrl = options.ledgerAdapterUrl ?? process.env.LEDGER_ADAPTER_URL;
   const serviceBaseUrl =

@@ -1,24 +1,39 @@
 import { randomUUID } from "node:crypto";
 import Fastify from "fastify";
-import type {
-  CancelEscrowRequest,
-  CancelEscrowResponse,
-  ChangeCertificateStatusRequest,
-  ChangeCertificateStatusResponse,
-  CreateListingRequest,
-  CreateListingResponse,
-  GetListingResponse,
-  LockEscrowRequest,
-  LockEscrowResponse,
-  MarketplaceListing,
-  SettleEscrowRequest,
-  SettleEscrowResponse,
-  SignedCertificate,
-  TransferCertificateRequest,
-  TransferCertificateResponse,
+import type { FastifyReply, FastifyRequest } from "fastify";
+import {
+  type CancelEscrowRequest,
+  type CancelEscrowResponse,
+  canonicalJson,
+  type ChangeCertificateStatusRequest,
+  type ChangeCertificateStatusResponse,
+  type CreateListingRequest,
+  type CreateListingResponse,
+  type GetListingAuditResponse,
+  type GetListingResponse,
+  type ListListingsResponse,
+  type ListingAuditEvent,
+  type ListingStatus,
+  type LockEscrowRequest,
+  type LockEscrowResponse,
+  type MarketplaceListing,
+  type SettleEscrowRequest,
+  type SettleEscrowResponse,
+  sha256Hex,
+  type SignedCertificate,
+  type TransferCertificateRequest,
+  type TransferCertificateResponse,
 } from "@dgc/shared";
+import {
+  type ListingStore,
+  SqliteListingStore,
+} from "./storage/listing-store.js";
 
 const DEFAULT_CERTIFICATE_SERVICE_URL = "http://127.0.0.1:4101";
+const DEFAULT_MARKETPLACE_DB_PATH = "data/marketplace-service.db";
+const IDEMPOTENCY_HEADER = "idempotency-key";
+
+type EscrowAction = "LOCK_ESCROW" | "SETTLE_ESCROW" | "CANCEL_ESCROW";
 
 interface HttpResult<T> {
   ok: boolean;
@@ -79,8 +94,16 @@ function isAmount(value: unknown): value is string {
   return typeof value === "string" && /^\d+(\.\d{1,4})?$/.test(value);
 }
 
+function isListingStatus(value: unknown): value is ListingStatus {
+  return value === "OPEN" || value === "LOCKED" || value === "SETTLED" || value === "CANCELLED";
+}
+
 function listingIdNow(): string {
   return `LST-${new Date().toISOString()}-${randomUUID().split("-")[0]}`;
+}
+
+function listingAuditEventIdNow(): string {
+  return `AUD-${new Date().toISOString()}-${randomUUID().split("-")[0]}`;
 }
 
 function parseCreateListingRequest(body: unknown): CreateListingRequest | null {
@@ -127,6 +150,43 @@ function parseCancelEscrowRequest(body: unknown): CancelEscrowRequest | null {
   };
 }
 
+function parseListQuery(query: unknown): { status?: ListingStatus } | null {
+  if (query === undefined) return {};
+  if (!isObject(query)) return null;
+
+  if (query.status === undefined) return {};
+  if (!isListingStatus(query.status)) return null;
+  return { status: query.status };
+}
+
+function readIdempotencyKey(req: FastifyRequest): string | null {
+  const raw = req.headers[IDEMPOTENCY_HEADER];
+  if (Array.isArray(raw)) {
+    const first = raw[0];
+    return isNonEmptyString(first) ? first.trim() : null;
+  }
+  if (!isNonEmptyString(raw)) return null;
+  return raw.trim();
+}
+
+function writeAuditEvent(
+  listingStore: ListingStore,
+  listingId: string,
+  type: ListingAuditEvent["type"],
+  actor?: string,
+  details?: Record<string, unknown>,
+): void {
+  const event: ListingAuditEvent = {
+    eventId: listingAuditEventIdNow(),
+    listingId,
+    type,
+    actor,
+    occurredAt: new Date().toISOString(),
+    details,
+  };
+  listingStore.appendAuditEvent(event);
+}
+
 async function requestJson<T>(url: string, init: RequestInit): Promise<HttpResult<T>> {
   try {
     const response = await fetch(url, {
@@ -158,10 +218,7 @@ function getErrorMessage(payload: unknown): string | undefined {
   return isNonEmptyString(payload.message) ? payload.message : undefined;
 }
 
-function sendCertificateServiceError(
-  reply: { code: (statusCode: number) => { send: (payload: unknown) => void } },
-  result: HttpResult<unknown>,
-): void {
+function sendCertificateServiceError(reply: FastifyReply, result: HttpResult<unknown>): void {
   if (result.status === 0) {
     reply.code(502).send({ error: "certificate_service_unreachable" });
     return;
@@ -186,14 +243,61 @@ function sendCertificateServiceError(
   });
 }
 
+function replayIdempotentIfExists(
+  reply: FastifyReply,
+  listingStore: ListingStore,
+  action: EscrowAction,
+  idempotencyKey: string,
+  requestHash: string,
+): boolean {
+  const existing = listingStore.getIdempotencyRecord(action, idempotencyKey);
+  if (!existing) return false;
+
+  if (existing.requestHash !== requestHash) {
+    reply.code(409).send({
+      error: "idempotency_key_reuse_conflict",
+      message: "Idempotency key already used with different payload",
+    });
+    return true;
+  }
+
+  reply.code(existing.responseStatus).send(existing.responseBody);
+  return true;
+}
+
+function saveIdempotentResponse(
+  listingStore: ListingStore,
+  action: EscrowAction,
+  idempotencyKey: string,
+  requestHash: string,
+  responseStatus: number,
+  responseBody: unknown,
+): void {
+  listingStore.putIdempotencyRecord({
+    action,
+    idempotencyKey,
+    requestHash,
+    responseStatus,
+    responseBody,
+    createdAt: new Date().toISOString(),
+  });
+}
+
 interface BuildServerOptions {
   certificateClient?: CertificateClient;
   certificateServiceUrl?: string;
+  listingStore?: ListingStore;
+  dbPath?: string;
 }
 
 export async function buildServer(options: BuildServerOptions = {}) {
   const app = Fastify({ logger: true });
-  const listings = new Map<string, MarketplaceListing>();
+  const listingStore =
+    options.listingStore ||
+    new SqliteListingStore(
+      options.dbPath || process.env.MARKETPLACE_DB_PATH || DEFAULT_MARKETPLACE_DB_PATH,
+    );
+  const ownListingStore = !options.listingStore;
 
   const certificateClient =
     options.certificateClient ||
@@ -251,9 +355,46 @@ export async function buildServer(options: BuildServerOptions = {}) {
       updatedAt: now,
     };
 
-    listings.set(listing.listingId, listing);
+    listingStore.putListing(listing);
+    writeAuditEvent(listingStore, listing.listingId, "CREATED", parsed.seller, {
+      certId: parsed.certId,
+      askPrice: parsed.askPrice,
+    });
+
     const response: CreateListingResponse = { listing };
     return reply.code(201).send(response);
+  });
+
+  app.get("/listings", async (req, reply) => {
+    const parsedQuery = parseListQuery(req.query);
+    if (!parsedQuery) {
+      return reply.code(400).send({
+        error: "invalid_query",
+        message: "status must be one of OPEN, LOCKED, SETTLED, CANCELLED",
+      });
+    }
+
+    const listings = listingStore.listListings({ status: parsedQuery.status });
+    const response: ListListingsResponse = { listings };
+    return response;
+  });
+
+  app.get("/listings/:listingId/audit", async (req, reply) => {
+    const params = req.params as { listingId?: string };
+    if (!isNonEmptyString(params.listingId)) {
+      return reply.code(400).send({ error: "invalid_listing_id" });
+    }
+
+    const listing = listingStore.getListing(params.listingId);
+    if (!listing) {
+      return reply.code(404).send({ error: "listing_not_found" });
+    }
+
+    const response: GetListingAuditResponse = {
+      listingId: params.listingId,
+      events: listingStore.getAuditEvents(params.listingId),
+    };
+    return response;
   });
 
   app.get("/listings/:listingId", async (req, reply) => {
@@ -262,7 +403,7 @@ export async function buildServer(options: BuildServerOptions = {}) {
       return reply.code(400).send({ error: "invalid_listing_id" });
     }
 
-    const listing = listings.get(params.listingId);
+    const listing = listingStore.getListing(params.listingId);
     if (!listing) {
       return reply.code(404).send({ error: "listing_not_found" });
     }
@@ -280,7 +421,20 @@ export async function buildServer(options: BuildServerOptions = {}) {
       });
     }
 
-    const current = listings.get(parsed.listingId);
+    const idempotencyKey = readIdempotencyKey(req);
+    if (!idempotencyKey) {
+      return reply.code(400).send({
+        error: "missing_idempotency_key",
+        message: `Set '${IDEMPOTENCY_HEADER}' header`,
+      });
+    }
+
+    const requestHash = sha256Hex(canonicalJson(parsed));
+    if (replayIdempotentIfExists(reply, listingStore, "LOCK_ESCROW", idempotencyKey, requestHash)) {
+      return;
+    }
+
+    const current = listingStore.getListing(parsed.listingId);
     if (!current) {
       return reply.code(404).send({ error: "listing_not_found" });
     }
@@ -309,9 +463,22 @@ export async function buildServer(options: BuildServerOptions = {}) {
       lockedAt: now,
       updatedAt: now,
     };
-    listings.set(updated.listingId, updated);
+    listingStore.putListing(updated);
+    writeAuditEvent(listingStore, updated.listingId, "LOCKED", parsed.buyer, {
+      idempotencyKey,
+      fromStatus: current.status,
+      toStatus: updated.status,
+    });
 
     const response: LockEscrowResponse = { listing: updated };
+    saveIdempotentResponse(
+      listingStore,
+      "LOCK_ESCROW",
+      idempotencyKey,
+      requestHash,
+      200,
+      response,
+    );
     return response;
   });
 
@@ -324,7 +491,22 @@ export async function buildServer(options: BuildServerOptions = {}) {
       });
     }
 
-    const current = listings.get(parsed.listingId);
+    const idempotencyKey = readIdempotencyKey(req);
+    if (!idempotencyKey) {
+      return reply.code(400).send({
+        error: "missing_idempotency_key",
+        message: `Set '${IDEMPOTENCY_HEADER}' header`,
+      });
+    }
+
+    const requestHash = sha256Hex(canonicalJson(parsed));
+    if (
+      replayIdempotentIfExists(reply, listingStore, "SETTLE_ESCROW", idempotencyKey, requestHash)
+    ) {
+      return;
+    }
+
+    const current = listingStore.getListing(parsed.listingId);
     if (!current) {
       return reply.code(404).send({ error: "listing_not_found" });
     }
@@ -360,7 +542,6 @@ export async function buildServer(options: BuildServerOptions = {}) {
     });
 
     if (!transferResult.ok) {
-      // Best-effort rollback to LOCKED if transfer fails after unlock.
       await certificateClient.changeStatus({
         certId: current.certId,
         status: "LOCKED",
@@ -382,12 +563,26 @@ export async function buildServer(options: BuildServerOptions = {}) {
       settledAt: now,
       updatedAt: now,
     };
-    listings.set(updated.listingId, updated);
+    listingStore.putListing(updated);
+    writeAuditEvent(listingStore, updated.listingId, "SETTLED", parsed.buyer, {
+      idempotencyKey,
+      fromStatus: current.status,
+      toStatus: updated.status,
+      settledPrice,
+    });
 
     const response: SettleEscrowResponse = {
       listing: updated,
       transfer,
     };
+    saveIdempotentResponse(
+      listingStore,
+      "SETTLE_ESCROW",
+      idempotencyKey,
+      requestHash,
+      200,
+      response,
+    );
     return response;
   });
 
@@ -400,7 +595,22 @@ export async function buildServer(options: BuildServerOptions = {}) {
       });
     }
 
-    const current = listings.get(parsed.listingId);
+    const idempotencyKey = readIdempotencyKey(req);
+    if (!idempotencyKey) {
+      return reply.code(400).send({
+        error: "missing_idempotency_key",
+        message: `Set '${IDEMPOTENCY_HEADER}' header`,
+      });
+    }
+
+    const requestHash = sha256Hex(canonicalJson(parsed));
+    if (
+      replayIdempotentIfExists(reply, listingStore, "CANCEL_ESCROW", idempotencyKey, requestHash)
+    ) {
+      return;
+    }
+
+    const current = listingStore.getListing(parsed.listingId);
     if (!current) {
       return reply.code(404).send({ error: "listing_not_found" });
     }
@@ -431,10 +641,30 @@ export async function buildServer(options: BuildServerOptions = {}) {
       cancelReason: parsed.reason,
       updatedAt: now,
     };
-    listings.set(updated.listingId, updated);
+    listingStore.putListing(updated);
+    writeAuditEvent(listingStore, updated.listingId, "CANCELLED", current.lockedBy || current.seller, {
+      idempotencyKey,
+      fromStatus: current.status,
+      toStatus: updated.status,
+      reason: parsed.reason,
+    });
 
     const response: CancelEscrowResponse = { listing: updated };
+    saveIdempotentResponse(
+      listingStore,
+      "CANCEL_ESCROW",
+      idempotencyKey,
+      requestHash,
+      200,
+      response,
+    );
     return response;
+  });
+
+  app.addHook("onClose", async () => {
+    if (ownListingStore) {
+      listingStore.close();
+    }
   });
 
   return app;
