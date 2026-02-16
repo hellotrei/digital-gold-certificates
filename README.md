@@ -80,9 +80,23 @@ Run tests:
 pnpm -C contracts test
 ```
 
-## Milestone 6 (Current)
+## Milestone 7 (Current)
 
-Milestone 6 hardens marketplace backend flow (local-first):
+Milestone 7 introduces a local risk-scoring stream:
+- `risk-stream` service with SQLite persistence (`RISK_DB_PATH`)
+- Ingestion endpoints:
+  - `POST /ingest/ledger-event`
+  - `POST /ingest/listing-audit-event`
+- Risk query endpoints:
+  - `GET /risk/certificates/:certId`
+  - `GET /risk/listings/:listingId`
+- Risk heuristics MVP:
+  - transfer velocity spikes
+  - wash-loop transfer patterns (back-and-forth owner movement)
+  - repeated lock/cancel and timeout-driven cancellation patterns
+- `ledger-adapter` and `marketplace-service` can publish events to risk-stream via `RISK_STREAM_URL`
+
+Milestone 6 marketplace hardening remains active:
 - `marketplace-service` endpoints:
   - `GET /listings?status=OPEN|LOCKED|SETTLED|CANCELLED`
   - `POST /listings/create`
@@ -102,7 +116,7 @@ Milestone 6 hardens marketplace backend flow (local-first):
   - `ISSUER_PRIVATE_KEY_HEX` must be set for `certificate-service`
   - `CHAIN_PRIVATE_KEY` must be set when `DGC_REGISTRY_ADDRESS` is enabled in `ledger-adapter`
 
-## Run Milestone 6 On Localhost (With Local Chain)
+## Run Milestone 7 On Localhost (With Local Chain)
 
 If `pnpm` is not installed globally, use `corepack pnpm`.
 
@@ -139,6 +153,7 @@ PORT=4103 \
 CHAIN_RPC_URL=http://127.0.0.1:8545 \
 CHAIN_PRIVATE_KEY=<YOUR_LOCAL_CHAIN_PRIVATE_KEY> \
 DGC_REGISTRY_ADDRESS=<PASTE_DEPLOYED_ADDRESS> \
+RISK_STREAM_URL=http://127.0.0.1:4104 \
 corepack pnpm -C services/ledger-adapter dev
 ```
 
@@ -158,13 +173,23 @@ Start marketplace service (terminal 5):
 PORT=4102 \
 CERTIFICATE_SERVICE_URL=http://127.0.0.1:4101 \
 MARKETPLACE_DB_PATH=./data/marketplace-service.db \
+RISK_STREAM_URL=http://127.0.0.1:4104 \
 corepack pnpm -C services/marketplace-service dev
+```
+
+Start risk-stream service (terminal 6):
+
+```bash
+PORT=4104 \
+RISK_DB_PATH=./data/risk-stream.db \
+corepack pnpm -C services/risk-stream dev
 ```
 
 Service URLs:
 - `http://127.0.0.1:4101` (certificate-service)
 - `http://127.0.0.1:4102` (marketplace-service)
 - `http://127.0.0.1:4103` (ledger-adapter)
+- `http://127.0.0.1:4104` (risk-stream)
 - `http://127.0.0.1:8545` (Hardhat local chain)
 - `http://127.0.0.1:3000` (web-verifier)
 
@@ -275,6 +300,18 @@ Get listing audit trail:
 curl http://127.0.0.1:4102/listings/<LISTING_ID>/audit
 ```
 
+Get certificate risk profile:
+
+```bash
+curl http://127.0.0.1:4104/risk/certificates/<CERT_ID>
+```
+
+Get listing risk profile:
+
+```bash
+curl http://127.0.0.1:4104/risk/listings/<LISTING_ID>
+```
+
 Certificate status responses:
 
 - Valid status values: `ACTIVE`, `LOCKED`, `REDEEMED`, `REVOKED`
@@ -341,6 +378,7 @@ Run tests:
 ```bash
 corepack pnpm -C contracts test
 corepack pnpm -C services/marketplace-service test
+corepack pnpm -C services/risk-stream test
 corepack pnpm -C services/ledger-adapter test
 corepack pnpm -C services/certificate-service test
 ```

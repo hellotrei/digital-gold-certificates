@@ -18,6 +18,7 @@ import {
 
 interface BuildServerOptions {
   chainWriter?: ChainWriter | null;
+  riskStreamUrl?: string;
 }
 
 interface StoredEvent {
@@ -84,12 +85,30 @@ function isRecordLedgerEventRequest(body: unknown): body is RecordLedgerEventReq
   return isLedgerEvent(body.event);
 }
 
+async function tryPublishRiskEvent(
+  riskStreamUrl: string | undefined,
+  event: LedgerEvent,
+): Promise<void> {
+  if (!riskStreamUrl) return;
+  try {
+    await fetch(`${riskStreamUrl.replace(/\/$/, "")}/ingest/ledger-event`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ event }),
+      signal: AbortSignal.timeout(3000),
+    });
+  } catch {
+    // Best-effort publish; do not fail primary event recording path.
+  }
+}
+
 export async function buildServer(options: BuildServerOptions = {}) {
   const app = Fastify({ logger: true });
   const proofStore = new Map<string, ProofAnchorRecord>();
   const eventStore = new Map<string, StoredEvent[]>();
   const chainWriter =
     options.chainWriter === undefined ? buildChainWriterFromEnv() : options.chainWriter;
+  const riskStreamUrl = options.riskStreamUrl ?? process.env.RISK_STREAM_URL;
 
   app.get("/health", async () => ({ ok: true, service: "ledger-adapter" }));
 
@@ -187,6 +206,8 @@ export async function buildServer(options: BuildServerOptions = {}) {
       eventHash,
       ledgerTxRef,
     };
+
+    await tryPublishRiskEvent(riskStreamUrl, event);
     return reply.code(201).send(response);
   });
 

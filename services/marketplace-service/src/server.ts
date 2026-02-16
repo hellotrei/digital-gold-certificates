@@ -175,7 +175,7 @@ function writeAuditEvent(
   type: ListingAuditEvent["type"],
   actor?: string,
   details?: Record<string, unknown>,
-): void {
+): ListingAuditEvent {
   const event: ListingAuditEvent = {
     eventId: listingAuditEventIdNow(),
     listingId,
@@ -185,6 +185,25 @@ function writeAuditEvent(
     details,
   };
   listingStore.appendAuditEvent(event);
+  return event;
+}
+
+async function tryPublishListingAuditEvent(
+  riskStreamUrl: string | undefined,
+  event: ListingAuditEvent,
+  listing: MarketplaceListing,
+): Promise<void> {
+  if (!riskStreamUrl) return;
+  try {
+    await fetch(`${riskStreamUrl.replace(/\/$/, "")}/ingest/listing-audit-event`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ event, listing }),
+      signal: AbortSignal.timeout(3000),
+    });
+  } catch {
+    // Best-effort publish; do not fail marketplace primary flow.
+  }
 }
 
 async function requestJson<T>(url: string, init: RequestInit): Promise<HttpResult<T>> {
@@ -286,6 +305,7 @@ function saveIdempotentResponse(
 interface BuildServerOptions {
   certificateClient?: CertificateClient;
   certificateServiceUrl?: string;
+  riskStreamUrl?: string;
   listingStore?: ListingStore;
   dbPath?: string;
 }
@@ -307,6 +327,7 @@ export async function buildServer(options: BuildServerOptions = {}) {
         DEFAULT_CERTIFICATE_SERVICE_URL
       ).replace(/\/$/, ""),
     );
+  const riskStreamUrl = options.riskStreamUrl ?? process.env.RISK_STREAM_URL;
 
   app.get("/health", async () => ({ ok: true, service: "marketplace-service" }));
 
@@ -356,10 +377,11 @@ export async function buildServer(options: BuildServerOptions = {}) {
     };
 
     listingStore.putListing(listing);
-    writeAuditEvent(listingStore, listing.listingId, "CREATED", parsed.seller, {
+    const auditEvent = writeAuditEvent(listingStore, listing.listingId, "CREATED", parsed.seller, {
       certId: parsed.certId,
       askPrice: parsed.askPrice,
     });
+    await tryPublishListingAuditEvent(riskStreamUrl, auditEvent, listing);
 
     const response: CreateListingResponse = { listing };
     return reply.code(201).send(response);
@@ -464,11 +486,12 @@ export async function buildServer(options: BuildServerOptions = {}) {
       updatedAt: now,
     };
     listingStore.putListing(updated);
-    writeAuditEvent(listingStore, updated.listingId, "LOCKED", parsed.buyer, {
+    const auditEvent = writeAuditEvent(listingStore, updated.listingId, "LOCKED", parsed.buyer, {
       idempotencyKey,
       fromStatus: current.status,
       toStatus: updated.status,
     });
+    await tryPublishListingAuditEvent(riskStreamUrl, auditEvent, updated);
 
     const response: LockEscrowResponse = { listing: updated };
     saveIdempotentResponse(
@@ -564,12 +587,13 @@ export async function buildServer(options: BuildServerOptions = {}) {
       updatedAt: now,
     };
     listingStore.putListing(updated);
-    writeAuditEvent(listingStore, updated.listingId, "SETTLED", parsed.buyer, {
+    const auditEvent = writeAuditEvent(listingStore, updated.listingId, "SETTLED", parsed.buyer, {
       idempotencyKey,
       fromStatus: current.status,
       toStatus: updated.status,
       settledPrice,
     });
+    await tryPublishListingAuditEvent(riskStreamUrl, auditEvent, updated);
 
     const response: SettleEscrowResponse = {
       listing: updated,
@@ -642,12 +666,18 @@ export async function buildServer(options: BuildServerOptions = {}) {
       updatedAt: now,
     };
     listingStore.putListing(updated);
-    writeAuditEvent(listingStore, updated.listingId, "CANCELLED", current.lockedBy || current.seller, {
+    const auditEvent = writeAuditEvent(
+      listingStore,
+      updated.listingId,
+      "CANCELLED",
+      current.lockedBy || current.seller,
+      {
       idempotencyKey,
       fromStatus: current.status,
       toStatus: updated.status,
       reason: parsed.reason,
     });
+    await tryPublishListingAuditEvent(riskStreamUrl, auditEvent, updated);
 
     const response: CancelEscrowResponse = { listing: updated };
     saveIdempotentResponse(

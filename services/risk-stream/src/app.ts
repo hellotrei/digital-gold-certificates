@@ -1,20 +1,11 @@
-import Fastify from "fastify";
-
-const app = Fastify({ logger: true });
-
-app.get("/health", async () => ({ ok: true, service: "risk-stream" }));
-
-// TODO: Implement domain routes per service responsibility.
-// - certificate-service: issue/sign/verify
-// - marketplace-service: listing/escrow/settlement
-// - ledger-adapter: anchor proofs + read ownership events
-// - risk-stream: ingest events + heuristics (anti-fraud, anomaly detection)
+import { buildServer } from "./server.js";
 
 const port = Number(process.env.PORT || 0) || 4104;
 
-app.listen({ port, host: "0.0.0.0" })
-  .then(() => app.log.info("risk-stream listening on :" + port))
+buildServer()
+  .then((app) => app.listen({ port, host: "0.0.0.0" }))
   .catch((err) => {
-    app.log.error(err);
+    // eslint-disable-next-line no-console
+    console.error(err);
     process.exit(1);
   });

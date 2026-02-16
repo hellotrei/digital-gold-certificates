@@ -181,3 +181,56 @@ export interface GetTimelineResponse {
   certId: string;
   events: LedgerEvent[];
 }
+
+export interface RiskReason {
+  code: string;
+  scoreImpact: number;
+  message: string;
+  evidence?: Record<string, unknown>;
+}
+
+export type RiskLevel = "LOW" | "MEDIUM" | "HIGH";
+
+export interface CertificateRiskProfile {
+  certId: string;
+  score: number;
+  level: RiskLevel;
+  reasons: RiskReason[];
+  updatedAt: string;
+}
+
+export interface ListingRiskProfile {
+  listingId: string;
+  certId?: string;
+  score: number;
+  level: RiskLevel;
+  reasons: RiskReason[];
+  updatedAt: string;
+}
+
+export interface IngestLedgerEventRequest {
+  event: LedgerEvent;
+}
+
+export interface IngestLedgerEventResponse {
+  accepted: true;
+  certId: string;
+}
+
+export interface IngestListingAuditEventRequest {
+  event: ListingAuditEvent;
+  listing?: MarketplaceListing;
+}
+
+export interface IngestListingAuditEventResponse {
+  accepted: true;
+  listingId: string;
+}
+
+export interface GetCertificateRiskResponse {
+  profile: CertificateRiskProfile;
+}
+
+export interface GetListingRiskResponse {
+  profile: ListingRiskProfile;
+}
