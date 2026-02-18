@@ -6,6 +6,7 @@ import type {
   LedgerEvent,
   ListingAuditEvent,
   ListingRiskProfile,
+  RiskAlert,
 } from "@dgc/shared";
 
 interface LedgerRow {
@@ -29,6 +30,10 @@ interface CertIdRow {
   cert_id: string | null;
 }
 
+interface AlertRow {
+  alert_json: string;
+}
+
 export interface RiskStore {
   appendLedgerEvent(event: LedgerEvent): void;
   appendListingAuditEvent(event: ListingAuditEvent, certId?: string): void;
@@ -41,6 +46,10 @@ export interface RiskStore {
   upsertListingProfile(profile: ListingRiskProfile): void;
   getCertificateProfile(certId: string): CertificateRiskProfile | null;
   getListingProfile(listingId: string): ListingRiskProfile | null;
+  listTopCertificates(limit: number): CertificateRiskProfile[];
+  listTopListings(limit: number): ListingRiskProfile[];
+  insertAlert(alert: RiskAlert): void;
+  listAlerts(limit: number): RiskAlert[];
   close(): void;
 }
 
@@ -59,6 +68,10 @@ export class SqliteRiskStore implements RiskStore {
   private readonly upsertListingProfileStmt: Database.Statement<[string, string | null, number, string, string, string]>;
   private readonly getCertProfileStmt: Database.Statement<[string], CertProfileRow>;
   private readonly getListingProfileStmt: Database.Statement<[string], ListingProfileRow>;
+  private readonly listTopCertProfilesStmt: Database.Statement<[number], CertProfileRow>;
+  private readonly listTopListingProfilesStmt: Database.Statement<[number], ListingProfileRow>;
+  private readonly insertAlertStmt: Database.Statement<[string, string, string, number, string, string, string]>;
+  private readonly listAlertsStmt: Database.Statement<[number], AlertRow>;
 
   constructor(dbPath: string) {
     mkdirSync(dirname(dbPath), { recursive: true });
@@ -104,6 +117,18 @@ export class SqliteRiskStore implements RiskStore {
         updated_at TEXT NOT NULL,
         profile_json TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS risk_alerts (
+        alert_id TEXT PRIMARY KEY,
+        target_type TEXT NOT NULL,
+        target_id TEXT NOT NULL,
+        score INTEGER NOT NULL,
+        level TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        alert_json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_risk_alerts_created
+      ON risk_alerts(created_at DESC);
     `);
 
     this.insertLedgerEventStmt = this.db.prepare(`
@@ -187,6 +212,33 @@ export class SqliteRiskStore implements RiskStore {
       WHERE listing_id = ?
       LIMIT 1
     `) as Database.Statement<[string], ListingProfileRow>;
+
+    this.listTopCertProfilesStmt = this.db.prepare(`
+      SELECT profile_json
+      FROM risk_certificate_profiles
+      ORDER BY score DESC, updated_at DESC
+      LIMIT ?
+    `) as Database.Statement<[number], CertProfileRow>;
+
+    this.listTopListingProfilesStmt = this.db.prepare(`
+      SELECT profile_json
+      FROM risk_listing_profiles
+      ORDER BY score DESC, updated_at DESC
+      LIMIT ?
+    `) as Database.Statement<[number], ListingProfileRow>;
+
+    this.insertAlertStmt = this.db.prepare(`
+      INSERT INTO risk_alerts (alert_id, target_type, target_id, score, level, created_at, alert_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(alert_id) DO NOTHING
+    `);
+
+    this.listAlertsStmt = this.db.prepare(`
+      SELECT alert_json
+      FROM risk_alerts
+      ORDER BY created_at DESC
+      LIMIT ?
+    `) as Database.Statement<[number], AlertRow>;
   }
 
   appendLedgerEvent(event: LedgerEvent): void {
@@ -269,6 +321,33 @@ export class SqliteRiskStore implements RiskStore {
     const row = this.getListingProfileStmt.get(listingId);
     if (!row) return null;
     return JSON.parse(row.profile_json) as ListingRiskProfile;
+  }
+
+  listTopCertificates(limit: number): CertificateRiskProfile[] {
+    const rows = this.listTopCertProfilesStmt.all(limit);
+    return rows.map((row) => JSON.parse(row.profile_json) as CertificateRiskProfile);
+  }
+
+  listTopListings(limit: number): ListingRiskProfile[] {
+    const rows = this.listTopListingProfilesStmt.all(limit);
+    return rows.map((row) => JSON.parse(row.profile_json) as ListingRiskProfile);
+  }
+
+  insertAlert(alert: RiskAlert): void {
+    this.insertAlertStmt.run(
+      alert.alertId,
+      alert.targetType,
+      alert.targetId,
+      alert.score,
+      alert.level,
+      alert.createdAt,
+      JSON.stringify(alert),
+    );
+  }
+
+  listAlerts(limit: number): RiskAlert[] {
+    const rows = this.listAlertsStmt.all(limit);
+    return rows.map((row) => JSON.parse(row.alert_json) as RiskAlert);
   }
 
   close(): void {

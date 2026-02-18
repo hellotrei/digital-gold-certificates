@@ -7,6 +7,28 @@ type ApiResult<T> = {
   error?: string;
 };
 
+type RiskProfileSummary = {
+  score: number;
+  level: string;
+  reasons: Array<{ code: string; message?: string }>;
+};
+
+type RiskSummaryResponse = {
+  topCertificates: Array<{ certId: string; score: number; level: string }>;
+  topListings: Array<{ listingId: string; certId?: string; score: number; level: string }>;
+  updatedAt: string;
+};
+
+type RiskAlert = {
+  alertId: string;
+  targetType: string;
+  targetId: string;
+  score: number;
+  level: string;
+  reasons: Array<{ code: string; message?: string }>;
+  createdAt: string;
+};
+
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<ApiResult<T>> {
   try {
     const response = await fetch(url, {
@@ -42,9 +64,7 @@ function RiskCard({
   result,
 }: {
   title: string;
-  result: ApiResult<{
-    profile: { score: number; level: string; reasons: Array<{ code: string; message?: string }> };
-  }> | null;
+  result: ApiResult<{ profile: RiskProfileSummary }> | null;
 }) {
   if (!result) {
     return null;
@@ -98,6 +118,97 @@ function RiskCard({
   );
 }
 
+function SummarySection({ result }: { result: ApiResult<RiskSummaryResponse> | null }) {
+  if (!result) {
+    return null;
+  }
+  if (!result.ok) {
+    return (
+      <section>
+        <h2 style={{ marginBottom: 8 }}>Risk Summary</h2>
+        <pre
+          style={{ padding: 12, background: "#f6f6f6", borderRadius: 12, overflowX: "auto" }}
+        >
+          {JSON.stringify(result, null, 2)}
+        </pre>
+      </section>
+    );
+  }
+  const summary = result.data;
+  if (!summary) return null;
+  return (
+    <section>
+      <h2 style={{ marginBottom: 8 }}>Risk Summary</h2>
+      <div style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))" }}>
+        <div style={{ padding: 12, background: "#f6f6f6", borderRadius: 12 }}>
+          <strong>Top Certificates</strong>
+          {summary.topCertificates.length === 0 ? (
+            <p style={{ marginTop: 8 }}>No certificate scores yet.</p>
+          ) : (
+            <ul style={{ marginTop: 8 }}>
+              {summary.topCertificates.map((item) => (
+                <li key={item.certId}>
+                  {item.certId} — {item.score} ({item.level})
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <div style={{ padding: 12, background: "#f6f6f6", borderRadius: 12 }}>
+          <strong>Top Listings</strong>
+          {summary.topListings.length === 0 ? (
+            <p style={{ marginTop: 8 }}>No listing scores yet.</p>
+          ) : (
+            <ul style={{ marginTop: 8 }}>
+              {summary.topListings.map((item) => (
+                <li key={item.listingId}>
+                  {item.listingId} — {item.score} ({item.level})
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+      <p style={{ marginTop: 8, color: "#666" }}>Updated: {summary.updatedAt}</p>
+    </section>
+  );
+}
+
+function AlertsSection({ result }: { result: ApiResult<{ alerts: RiskAlert[] }> | null }) {
+  if (!result) {
+    return null;
+  }
+  if (!result.ok) {
+    return (
+      <section>
+        <h2 style={{ marginBottom: 8 }}>Recent Alerts</h2>
+        <pre
+          style={{ padding: 12, background: "#f6f6f6", borderRadius: 12, overflowX: "auto" }}
+        >
+          {JSON.stringify(result, null, 2)}
+        </pre>
+      </section>
+    );
+  }
+  const alerts = result.data?.alerts || [];
+  return (
+    <section>
+      <h2 style={{ marginBottom: 8 }}>Recent Alerts</h2>
+      {alerts.length === 0 ? (
+        <p>No alerts triggered.</p>
+      ) : (
+        <ul>
+          {alerts.map((alert) => (
+            <li key={alert.alertId}>
+              {alert.targetType} {alert.targetId} — {alert.score} ({alert.level})
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 export default async function Page({ searchParams }: { searchParams: SearchParams }) {
   const params = await searchParams;
   const certId = params.certId?.trim() || "";
@@ -109,16 +220,13 @@ export default async function Page({ searchParams }: { searchParams: SearchParam
   let certificateResult: ApiResult<unknown> | null = null;
   let verifyResult: ApiResult<unknown> | null = null;
   let timelineResult: ApiResult<unknown> | null = null;
-  let certificateRiskResult:
-    | ApiResult<{
-        profile: { score: number; level: string; reasons: Array<{ code: string; message?: string }> };
-      }>
-    | null = null;
-  let listingRiskResult:
-    | ApiResult<{
-        profile: { score: number; level: string; reasons: Array<{ code: string; message?: string }> };
-      }>
-    | null = null;
+  let certificateRiskResult: ApiResult<{ profile: RiskProfileSummary }> | null = null;
+  let listingRiskResult: ApiResult<{ profile: RiskProfileSummary }> | null = null;
+  let riskSummaryResult: ApiResult<RiskSummaryResponse> | null = null;
+  let riskAlertsResult: ApiResult<{ alerts: RiskAlert[] }> | null = null;
+
+  riskSummaryResult = await fetchJson(`${riskStreamUrl}/risk/summary?limit=5`);
+  riskAlertsResult = await fetchJson(`${riskStreamUrl}/risk/alerts?limit=5`);
 
   if (certId) {
     certificateResult = await fetchJson(
@@ -143,81 +251,105 @@ export default async function Page({ searchParams }: { searchParams: SearchParam
   }
 
   return (
-    <main style={{ maxWidth: 960, margin: "0 auto", padding: 24 }}>
-      <h1>Digital Gold Certificates — Verifier</h1>
-      <p>Milestone 8: certificate + timeline data plus risk scoring.</p>
+    <div
+      style={{
+        minHeight: "100vh",
+        padding: 24,
+        background: "linear-gradient(180deg, #f7f3e9 0%, #edf2f7 100%)",
+        fontFamily:
+          "IBM Plex Mono, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace",
+      }}
+    >
+      <main
+        style={{
+          maxWidth: 1024,
+          margin: "0 auto",
+          padding: 24,
+          background: "#fff",
+          borderRadius: 16,
+          boxShadow: "0 10px 30px rgba(15, 23, 42, 0.12)",
+        }}
+      >
+        <h1>Digital Gold Certificates — Verifier</h1>
+        <p>Milestone 9: risk summary, alerts, and certificate/listing drill-down.</p>
 
-      <form method="GET" style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
-        <input
-          type="text"
-          name="certId"
-          placeholder="Enter certId (e.g. DGC-2026-...)"
-          defaultValue={certId}
-          style={{ flex: "1 1 280px", padding: 10, border: "1px solid #ccc", borderRadius: 8 }}
-        />
-        <input
-          type="text"
-          name="listingId"
-          placeholder="Optional listingId"
-          defaultValue={listingId}
-          style={{ flex: "1 1 200px", padding: 10, border: "1px solid #ccc", borderRadius: 8 }}
-        />
-        <button type="submit" style={{ padding: "10px 14px", borderRadius: 8 }}>
-          Verify
-        </button>
-      </form>
+        <form method="GET" style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+          <input
+            type="text"
+            name="certId"
+            placeholder="Enter certId (e.g. DGC-2026-...)"
+            defaultValue={certId}
+            style={{ flex: "1 1 280px", padding: 10, border: "1px solid #ccc", borderRadius: 8 }}
+          />
+          <input
+            type="text"
+            name="listingId"
+            placeholder="Optional listingId"
+            defaultValue={listingId}
+            style={{ flex: "1 1 200px", padding: 10, border: "1px solid #ccc", borderRadius: 8 }}
+          />
+          <button type="submit" style={{ padding: "10px 14px", borderRadius: 8 }}>
+            Verify
+          </button>
+        </form>
 
-      {!certId && !listingId ? (
-        <p>Masukkan `certId` atau `listingId` untuk melihat data real, timeline, dan skor risiko.</p>
-      ) : (
-        <div style={{ display: "grid", gap: 12 }}>
-          {certId && (
-            <>
-              <section>
-                <h2 style={{ marginBottom: 8 }}>Certificate</h2>
-                <pre
-                  style={{
-                    padding: 12,
-                    background: "#f6f6f6",
-                    borderRadius: 12,
-                    overflowX: "auto",
-                  }}
-                >
-                  {JSON.stringify(certificateResult, null, 2)}
-                </pre>
-              </section>
-              <section>
-                <h2 style={{ marginBottom: 8 }}>Verify</h2>
-                <pre
-                  style={{
-                    padding: 12,
-                    background: "#f6f6f6",
-                    borderRadius: 12,
-                    overflowX: "auto",
-                  }}
-                >
-                  {JSON.stringify(verifyResult, null, 2)}
-                </pre>
-              </section>
-              <section>
-                <h2 style={{ marginBottom: 8 }}>Timeline</h2>
-                <pre
-                  style={{
-                    padding: 12,
-                    background: "#f6f6f6",
-                    borderRadius: 12,
-                    overflowX: "auto",
-                  }}
-                >
-                  {JSON.stringify(timelineResult, null, 2)}
-                </pre>
-              </section>
-            </>
-          )}
-          {certId && <RiskCard title="Certificate Risk" result={certificateRiskResult} />}
-          {listingId && <RiskCard title="Listing Risk" result={listingRiskResult} />}
+        <div style={{ display: "grid", gap: 16, marginBottom: 20 }}>
+          <SummarySection result={riskSummaryResult} />
+          <AlertsSection result={riskAlertsResult} />
         </div>
-      )}
-    </main>
+
+        {!certId && !listingId ? (
+          <p>Masukkan `certId` atau `listingId` untuk melihat data real, timeline, dan skor risiko.</p>
+        ) : (
+          <div style={{ display: "grid", gap: 12 }}>
+            {certId && (
+              <>
+                <section>
+                  <h2 style={{ marginBottom: 8 }}>Certificate</h2>
+                  <pre
+                    style={{
+                      padding: 12,
+                      background: "#f6f6f6",
+                      borderRadius: 12,
+                      overflowX: "auto",
+                    }}
+                  >
+                    {JSON.stringify(certificateResult, null, 2)}
+                  </pre>
+                </section>
+                <section>
+                  <h2 style={{ marginBottom: 8 }}>Verify</h2>
+                  <pre
+                    style={{
+                      padding: 12,
+                      background: "#f6f6f6",
+                      borderRadius: 12,
+                      overflowX: "auto",
+                    }}
+                  >
+                    {JSON.stringify(verifyResult, null, 2)}
+                  </pre>
+                </section>
+                <section>
+                  <h2 style={{ marginBottom: 8 }}>Timeline</h2>
+                  <pre
+                    style={{
+                      padding: 12,
+                      background: "#f6f6f6",
+                      borderRadius: 12,
+                      overflowX: "auto",
+                    }}
+                  >
+                    {JSON.stringify(timelineResult, null, 2)}
+                  </pre>
+                </section>
+              </>
+            )}
+            {certId && <RiskCard title="Certificate Risk" result={certificateRiskResult} />}
+            {listingId && <RiskCard title="Listing Risk" result={listingRiskResult} />}
+          </div>
+        )}
+      </main>
+    </div>
   );
 }

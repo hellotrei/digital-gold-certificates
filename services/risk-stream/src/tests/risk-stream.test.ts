@@ -175,6 +175,85 @@ test("persists risk profiles across restart", async () => {
   }
 });
 
+test("summarizes risk profiles and emits alerts when threshold crossed", async () => {
+  const temp = createTempDbPath();
+  const previousThreshold = process.env.RISK_ALERT_THRESHOLD;
+  process.env.RISK_ALERT_THRESHOLD = "10";
+  const app = await buildServer({ dbPath: temp.dbPath });
+  try {
+    const events: LedgerEvent[] = [
+      {
+        type: "TRANSFER",
+        certId: "DGC-RISK-CERT-4",
+        occurredAt: nowMinusMs(50 * 60 * 1000),
+        from: "0x1",
+        to: "0x2",
+        amountGram: "1.0000",
+      },
+      {
+        type: "TRANSFER",
+        certId: "DGC-RISK-CERT-4",
+        occurredAt: nowMinusMs(40 * 60 * 1000),
+        from: "0x2",
+        to: "0x3",
+        amountGram: "1.0000",
+      },
+      {
+        type: "TRANSFER",
+        certId: "DGC-RISK-CERT-4",
+        occurredAt: nowMinusMs(30 * 60 * 1000),
+        from: "0x3",
+        to: "0x4",
+        amountGram: "1.0000",
+      },
+    ];
+
+    for (const event of events) {
+      const ingest = await app.inject({
+        method: "POST",
+        url: "/ingest/ledger-event",
+        payload: { event },
+      });
+      assert.equal(ingest.statusCode, 202);
+    }
+
+    const summaryRes = await app.inject({
+      method: "GET",
+      url: "/risk/summary?limit=5",
+    });
+    assert.equal(summaryRes.statusCode, 200);
+    const summaryBody = summaryRes.json() as {
+      topCertificates: Array<{ certId: string; score: number }>;
+      topListings: Array<{ listingId: string }>;
+    };
+    assert.equal(summaryBody.topCertificates.length, 1);
+    assert.equal(summaryBody.topCertificates[0]?.certId, "DGC-RISK-CERT-4");
+    assert.ok(summaryBody.topCertificates[0]?.score >= 25);
+    assert.equal(summaryBody.topListings.length, 0);
+
+    const alertsRes = await app.inject({
+      method: "GET",
+      url: "/risk/alerts?limit=5",
+    });
+    assert.equal(alertsRes.statusCode, 200);
+    const alertsBody = alertsRes.json() as {
+      alerts: Array<{ targetType: string; targetId: string; score: number }>;
+    };
+    assert.equal(alertsBody.alerts.length, 1);
+    assert.equal(alertsBody.alerts[0]?.targetType, "CERTIFICATE");
+    assert.equal(alertsBody.alerts[0]?.targetId, "DGC-RISK-CERT-4");
+    assert.ok(alertsBody.alerts[0]?.score >= 25);
+  } finally {
+    await app.close();
+    if (previousThreshold === undefined) {
+      delete process.env.RISK_ALERT_THRESHOLD;
+    } else {
+      process.env.RISK_ALERT_THRESHOLD = previousThreshold;
+    }
+    rmSync(temp.dir, { recursive: true, force: true });
+  }
+});
+
 test("returns 404 when risk profile does not exist", async () => {
   const temp = createTempDbPath();
   const app = await buildServer({ dbPath: temp.dbPath });

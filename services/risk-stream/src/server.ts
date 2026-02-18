@@ -3,6 +3,7 @@ import type {
   CertificateRiskProfile,
   GetCertificateRiskResponse,
   GetListingRiskResponse,
+  GetRiskAlertsResponse,
   IngestLedgerEventRequest,
   IngestLedgerEventResponse,
   IngestListingAuditEventRequest,
@@ -10,12 +11,17 @@ import type {
   LedgerEvent,
   ListingAuditEvent,
   ListingRiskProfile,
+  RiskAlert,
   RiskLevel,
   RiskReason,
+  RiskSummaryResponse,
 } from "@dgc/shared";
 import { SqliteRiskStore, type RiskStore } from "./storage/risk-store.js";
 
 const DEFAULT_RISK_DB_PATH = "data/risk-stream.db";
+const DEFAULT_ALERT_THRESHOLD = 60;
+const DEFAULT_SUMMARY_LIMIT = 5;
+const DEFAULT_ALERT_LIMIT = 20;
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -106,6 +112,13 @@ function parseIngestListingRequest(body: unknown): IngestListingAuditEventReques
 function toMs(iso: string): number {
   const parsed = Date.parse(iso);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function parseLimitParam(value: unknown, fallback: number): number {
+  if (!isNonEmptyString(value)) return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.min(Math.floor(parsed), 50);
 }
 
 function computeRiskLevel(score: number): RiskLevel {
@@ -276,17 +289,69 @@ function buildListingRiskProfile(
   };
 }
 
-function recalculateCertificateProfile(riskStore: RiskStore, certId: string): CertificateRiskProfile {
+async function publishAlert(
+  alert: RiskAlert,
+  webhookUrl: string | undefined,
+): Promise<void> {
+  if (!webhookUrl) return;
+  try {
+    await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(alert),
+      signal: AbortSignal.timeout(3000),
+    });
+  } catch {
+    // Best-effort webhook delivery.
+  }
+}
+
+async function maybeEmitAlert(
+  riskStore: RiskStore,
+  alert: RiskAlert,
+  previousScore: number | null,
+  threshold: number,
+  webhookUrl: string | undefined,
+): Promise<void> {
+  if (alert.score < threshold) return;
+  if (previousScore !== null && previousScore >= threshold) return;
+  riskStore.insertAlert(alert);
+  await publishAlert(alert, webhookUrl);
+}
+
+async function recalculateCertificateProfile(
+  riskStore: RiskStore,
+  certId: string,
+  threshold: number,
+  webhookUrl: string | undefined,
+): Promise<CertificateRiskProfile> {
+  const previous = riskStore.getCertificateProfile(certId);
   const profile = buildCertificateRiskProfile(
     certId,
     riskStore.getLedgerEventsByCert(certId),
     riskStore.getListingAuditEventsByCert(certId),
   );
   riskStore.upsertCertificateProfile(profile);
+  const alert: RiskAlert = {
+    alertId: `ALERT-CERT-${certId}-${profile.updatedAt}`,
+    targetType: "CERTIFICATE",
+    targetId: certId,
+    score: profile.score,
+    level: profile.level,
+    reasons: profile.reasons,
+    createdAt: profile.updatedAt,
+  };
+  await maybeEmitAlert(riskStore, alert, previous?.score ?? null, threshold, webhookUrl);
   return profile;
 }
 
-function recalculateListingProfile(riskStore: RiskStore, listingId: string): ListingRiskProfile | null {
+async function recalculateListingProfile(
+  riskStore: RiskStore,
+  listingId: string,
+  threshold: number,
+  webhookUrl: string | undefined,
+): Promise<ListingRiskProfile | null> {
+  const previous = riskStore.getListingProfile(listingId);
   const listingEvents = riskStore.getListingAuditEventsByListing(listingId);
   if (listingEvents.length === 0) return null;
   const certId =
@@ -301,8 +366,19 @@ function recalculateListingProfile(riskStore: RiskStore, listingId: string): Lis
   );
   riskStore.upsertListingProfile(profile);
 
+  const alert: RiskAlert = {
+    alertId: `ALERT-LIST-${listingId}-${profile.updatedAt}`,
+    targetType: "LISTING",
+    targetId: listingId,
+    score: profile.score,
+    level: profile.level,
+    reasons: profile.reasons,
+    createdAt: profile.updatedAt,
+  };
+  await maybeEmitAlert(riskStore, alert, previous?.score ?? null, threshold, webhookUrl);
+
   if (certId) {
-    recalculateCertificateProfile(riskStore, certId);
+    await recalculateCertificateProfile(riskStore, certId, threshold, webhookUrl);
   }
   return profile;
 }
@@ -318,6 +394,11 @@ export async function buildServer(options: BuildServerOptions = {}) {
     options.riskStore ||
     new SqliteRiskStore(options.dbPath || process.env.RISK_DB_PATH || DEFAULT_RISK_DB_PATH);
   const ownRiskStore = !options.riskStore;
+  const alertThresholdRaw = Number(process.env.RISK_ALERT_THRESHOLD || DEFAULT_ALERT_THRESHOLD);
+  const alertThreshold = Number.isFinite(alertThresholdRaw)
+    ? Math.max(0, Math.min(100, alertThresholdRaw))
+    : DEFAULT_ALERT_THRESHOLD;
+  const alertWebhookUrl = process.env.RISK_ALERT_WEBHOOK_URL;
 
   app.get("/health", async () => ({ ok: true, service: "risk-stream" }));
 
@@ -331,7 +412,12 @@ export async function buildServer(options: BuildServerOptions = {}) {
     }
 
     riskStore.appendLedgerEvent(parsed.event);
-    recalculateCertificateProfile(riskStore, parsed.event.certId);
+    await recalculateCertificateProfile(
+      riskStore,
+      parsed.event.certId,
+      alertThreshold,
+      alertWebhookUrl,
+    );
     const response: IngestLedgerEventResponse = {
       accepted: true,
       certId: parsed.event.certId,
@@ -350,7 +436,12 @@ export async function buildServer(options: BuildServerOptions = {}) {
 
     const certId = parsed.listing?.certId || riskStore.getListingCertId(parsed.event.listingId);
     riskStore.appendListingAuditEvent(parsed.event, certId);
-    recalculateListingProfile(riskStore, parsed.event.listingId);
+    await recalculateListingProfile(
+      riskStore,
+      parsed.event.listingId,
+      alertThreshold,
+      alertWebhookUrl,
+    );
 
     const response: IngestListingAuditEventResponse = {
       accepted: true,
@@ -386,6 +477,26 @@ export async function buildServer(options: BuildServerOptions = {}) {
     }
 
     const response: GetListingRiskResponse = { profile };
+    return response;
+  });
+
+  app.get("/risk/summary", async (req) => {
+    const query = req.query as { limit?: string };
+    const limit = parseLimitParam(query.limit, DEFAULT_SUMMARY_LIMIT);
+    const response: RiskSummaryResponse = {
+      topCertificates: riskStore.listTopCertificates(limit),
+      topListings: riskStore.listTopListings(limit),
+      updatedAt: new Date().toISOString(),
+    };
+    return response;
+  });
+
+  app.get("/risk/alerts", async (req) => {
+    const query = req.query as { limit?: string };
+    const limit = parseLimitParam(query.limit, DEFAULT_ALERT_LIMIT);
+    const response: GetRiskAlertsResponse = {
+      alerts: riskStore.listAlerts(limit),
+    };
     return response;
   });
 

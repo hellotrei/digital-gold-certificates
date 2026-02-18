@@ -80,9 +80,9 @@ Run tests:
 pnpm -C contracts test
 ```
 
-## Milestone 7 (Current)
+## Milestone 9 (Current)
 
-Milestone 7 introduces a local risk-scoring stream:
+Milestone 9 adds a local risk dashboard + alerting layer:
 - `risk-stream` service with SQLite persistence (`RISK_DB_PATH`)
 - Ingestion endpoints:
   - `POST /ingest/ledger-event`
@@ -90,11 +90,17 @@ Milestone 7 introduces a local risk-scoring stream:
 - Risk query endpoints:
   - `GET /risk/certificates/:certId`
   - `GET /risk/listings/:listingId`
+  - `GET /risk/summary?limit=5`
+  - `GET /risk/alerts?limit=20`
 - Risk heuristics MVP:
   - transfer velocity spikes
   - wash-loop transfer patterns (back-and-forth owner movement)
   - repeated lock/cancel and timeout-driven cancellation patterns
+- Alerting:
+  - when risk score crosses `RISK_ALERT_THRESHOLD` (default 60)
+  - persisted in `risk_alerts` table and streamed to `RISK_ALERT_WEBHOOK_URL` (optional)
 - `ledger-adapter` and `marketplace-service` can publish events to risk-stream via `RISK_STREAM_URL`
+- Web verifier now shows risk summaries and recent alerts
 
 Milestone 6 marketplace hardening remains active:
 - `marketplace-service` endpoints:
@@ -116,7 +122,7 @@ Milestone 6 marketplace hardening remains active:
   - `ISSUER_PRIVATE_KEY_HEX` must be set for `certificate-service`
   - `CHAIN_PRIVATE_KEY` must be set when `DGC_REGISTRY_ADDRESS` is enabled in `ledger-adapter`
 
-## Run Milestone 7 On Localhost (With Local Chain)
+## Run Milestone 9 On Localhost (With Local Chain)
 
 If `pnpm` is not installed globally, use `corepack pnpm`.
 
@@ -182,6 +188,9 @@ Start risk-stream service (terminal 6):
 ```bash
 PORT=4104 \
 RISK_DB_PATH=./data/risk-stream.db \
+RISK_ALERT_THRESHOLD=60 \
+# optional: push alerts to a webhook
+# RISK_ALERT_WEBHOOK_URL=http://127.0.0.1:9999/alerts \
 corepack pnpm -C services/risk-stream dev
 ```
 

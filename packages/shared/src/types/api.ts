@@ -208,6 +208,18 @@ export interface ListingRiskProfile {
   updatedAt: string;
 }
 
+export type RiskAlertTarget = "CERTIFICATE" | "LISTING";
+
+export interface RiskAlert {
+  alertId: string;
+  targetType: RiskAlertTarget;
+  targetId: string;
+  score: number;
+  level: RiskLevel;
+  reasons: RiskReason[];
+  createdAt: string;
+}
+
 export interface IngestLedgerEventRequest {
   event: LedgerEvent;
 }
@@ -233,4 +245,14 @@ export interface GetCertificateRiskResponse {
 
 export interface GetListingRiskResponse {
   profile: ListingRiskProfile;
+}
+
+export interface RiskSummaryResponse {
+  topCertificates: CertificateRiskProfile[];
+  topListings: ListingRiskProfile[];
+  updatedAt: string;
+}
+
+export interface GetRiskAlertsResponse {
+  alerts: RiskAlert[];
 }
