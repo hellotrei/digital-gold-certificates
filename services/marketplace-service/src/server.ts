@@ -10,6 +10,7 @@ import {
   type CreateListingRequest,
   type CreateListingResponse,
   type GetListingAuditResponse,
+  type GetLatestReconciliationResponse,
   type GetListingResponse,
   type ListListingsResponse,
   type ListingAuditEvent,
@@ -51,6 +52,10 @@ export interface CertificateClient {
   ): Promise<HttpResult<TransferCertificateResponse>>;
 }
 
+export interface ReconciliationClient {
+  getLatest(): Promise<HttpResult<GetLatestReconciliationResponse>>;
+}
+
 class HttpCertificateClient implements CertificateClient {
   constructor(private readonly baseUrl: string) {}
 
@@ -78,6 +83,16 @@ class HttpCertificateClient implements CertificateClient {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(request),
+    });
+  }
+}
+
+class HttpReconciliationClient implements ReconciliationClient {
+  constructor(private readonly baseUrl: string) {}
+
+  async getLatest(): Promise<HttpResult<GetLatestReconciliationResponse>> {
+    return requestJson<GetLatestReconciliationResponse>(`${this.baseUrl}/reconcile/latest`, {
+      method: "GET",
     });
   }
 }
@@ -262,6 +277,43 @@ function sendCertificateServiceError(reply: FastifyReply, result: HttpResult<unk
   });
 }
 
+async function enforceFreezeGuard(
+  reply: FastifyReply,
+  reconciliationClient?: ReconciliationClient,
+): Promise<boolean> {
+  if (!reconciliationClient) return true;
+
+  const result = await reconciliationClient.getLatest();
+  if (!result.ok) {
+    if (result.status === 0) {
+      reply.code(503).send({ error: "reconciliation_service_unreachable" });
+      return false;
+    }
+    reply.code(502).send({
+      error: "reconciliation_service_error",
+      statusCode: result.status,
+    });
+    return false;
+  }
+
+  const freezeState = result.data?.freezeState;
+  if (!freezeState || typeof freezeState.active !== "boolean") {
+    reply.code(502).send({ error: "reconciliation_service_invalid_response" });
+    return false;
+  }
+
+  if (freezeState.active) {
+    reply.code(423).send({
+      error: "marketplace_frozen",
+      message: freezeState.reason || "Marketplace write actions are frozen by reconciliation control",
+      freezeState,
+    });
+    return false;
+  }
+
+  return true;
+}
+
 function replayIdempotentIfExists(
   reply: FastifyReply,
   listingStore: ListingStore,
@@ -305,6 +357,8 @@ function saveIdempotentResponse(
 interface BuildServerOptions {
   certificateClient?: CertificateClient;
   certificateServiceUrl?: string;
+  reconciliationClient?: ReconciliationClient;
+  reconciliationServiceUrl?: string;
   riskStreamUrl?: string;
   listingStore?: ListingStore;
   dbPath?: string;
@@ -327,6 +381,13 @@ export async function buildServer(options: BuildServerOptions = {}) {
         DEFAULT_CERTIFICATE_SERVICE_URL
       ).replace(/\/$/, ""),
     );
+  const reconciliationServiceUrl =
+    options.reconciliationServiceUrl ?? process.env.RECONCILIATION_SERVICE_URL;
+  const reconciliationClient =
+    options.reconciliationClient ||
+    (reconciliationServiceUrl
+      ? new HttpReconciliationClient(reconciliationServiceUrl.replace(/\/$/, ""))
+      : undefined);
   const riskStreamUrl = options.riskStreamUrl ?? process.env.RISK_STREAM_URL;
 
   app.get("/health", async () => ({ ok: true, service: "marketplace-service" }));
@@ -338,6 +399,10 @@ export async function buildServer(options: BuildServerOptions = {}) {
         error: "invalid_request",
         message: "Expected certId, seller, askPrice",
       });
+    }
+
+    if (!(await enforceFreezeGuard(reply, reconciliationClient))) {
+      return;
     }
 
     const certResult = await certificateClient.getCertificate(parsed.certId);
@@ -468,6 +533,10 @@ export async function buildServer(options: BuildServerOptions = {}) {
       });
     }
 
+    if (!(await enforceFreezeGuard(reply, reconciliationClient))) {
+      return;
+    }
+
     const statusResult = await certificateClient.changeStatus({
       certId: current.certId,
       status: "LOCKED",
@@ -546,6 +615,10 @@ export async function buildServer(options: BuildServerOptions = {}) {
         error: "buyer_mismatch",
         message: "Settlement buyer must match lock buyer",
       });
+    }
+
+    if (!(await enforceFreezeGuard(reply, reconciliationClient))) {
+      return;
     }
 
     const unlockResult = await certificateClient.changeStatus({

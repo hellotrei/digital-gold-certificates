@@ -46,6 +46,14 @@ export interface VerifyCertificateResponse {
   status: string;
 }
 
+export interface GetCertificateResponse {
+  certificate: SignedCertificate;
+}
+
+export interface ListCertificatesResponse {
+  certificates: SignedCertificate[];
+}
+
 export interface TransferCertificateRequest {
   certId: string;
   toOwner: string;
@@ -208,7 +216,7 @@ export interface ListingRiskProfile {
   updatedAt: string;
 }
 
-export type RiskAlertTarget = "CERTIFICATE" | "LISTING";
+export type RiskAlertTarget = "CERTIFICATE" | "LISTING" | "RECONCILIATION";
 
 export interface RiskAlert {
   alertId: string;
@@ -255,4 +263,57 @@ export interface RiskSummaryResponse {
 
 export interface GetRiskAlertsResponse {
   alerts: RiskAlert[];
+}
+
+export interface ReconciliationRun {
+  runId: string;
+  createdAt: string;
+  custodyTotalGram: string;
+  outstandingTotalGram: string;
+  mismatchGram: string;
+  absMismatchGram: string;
+  thresholdGram: string;
+  freezeTriggered: boolean;
+  certificatesEvaluated: number;
+  activeCertificates: number;
+  lockedCertificates: number;
+}
+
+export interface FreezeState {
+  active: boolean;
+  reason?: string;
+  updatedAt: string;
+  lastRunId?: string;
+}
+
+export interface RunReconciliationRequest {
+  inventoryTotalGram?: string;
+}
+
+export interface RunReconciliationResponse {
+  run: ReconciliationRun;
+  freezeState: FreezeState;
+}
+
+export interface GetLatestReconciliationResponse {
+  run: ReconciliationRun | null;
+  freezeState: FreezeState;
+}
+
+export interface ListReconciliationHistoryResponse {
+  runs: ReconciliationRun[];
+}
+
+export interface IngestReconciliationAlertRequest {
+  runId: string;
+  mismatchGram: string;
+  absMismatchGram: string;
+  thresholdGram: string;
+  freezeTriggered: boolean;
+  createdAt: string;
+}
+
+export interface IngestReconciliationAlertResponse {
+  accepted: true;
+  alertId: string;
 }

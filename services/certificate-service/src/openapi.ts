@@ -3,8 +3,9 @@ export function buildOpenApiSpec(serviceBaseUrl: string) {
     openapi: "3.0.3",
     info: {
       title: "DGC Certificate Service API",
-      version: "0.3.0",
-      description: "Milestone 3 API for issue, verify, transfer, split, status updates, and timeline.",
+      version: "0.4.0",
+      description:
+        "Certificate lifecycle API for issue, verify, transfer, split, status updates, timeline, and certificate listing.",
     },
     servers: [{ url: serviceBaseUrl }],
     paths: {
@@ -65,6 +66,26 @@ export function buildOpenApiSpec(serviceBaseUrl: string) {
             "400": { description: "Invalid request" },
             "404": { description: "Certificate not found" },
             "409": { description: "State conflict" },
+          },
+        },
+      },
+      "/certificates": {
+        get: {
+          summary: "List certificates (optional status filter)",
+          parameters: [
+            {
+              in: "query",
+              name: "status",
+              required: false,
+              schema: {
+                type: "string",
+                enum: ["ACTIVE", "LOCKED", "REDEEMED", "REVOKED"],
+              },
+            },
+          ],
+          responses: {
+            "200": { description: "Certificates listed" },
+            "400": { description: "Invalid status filter" },
           },
         },
       },

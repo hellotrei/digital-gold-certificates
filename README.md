@@ -31,6 +31,7 @@ This repository implements a portfolio-grade architecture where:
 - Split certificate support for partial transfers
 - Reconciliation checks between physical inventory and outstanding claims
 - Risk stream for anomaly patterns (velocity, wash trading behavior, repeat disputes)
+- Auto-freeze flag on reconciliation threshold breaches
 
 ## High-Level Architecture
 
@@ -58,6 +59,7 @@ flowchart LR
 - `services/ledger-adapter/` chain proof commit/verify adapter
 - `services/marketplace-service/` listing, escrow, settlement logic
 - `services/risk-stream/` event-driven risk scoring pipeline
+- `services/reconciliation-service/` custody-vs-claims reconciliation and freeze control
 - `apps/web-verifier/` public certificate verifier UI (Next.js)
 - `packages/shared/` shared crypto utilities and domain types
 - `docs/whitepaper/` whitepaper and supporting docs
@@ -80,13 +82,33 @@ Run tests:
 pnpm -C contracts test
 ```
 
-## Milestone 9 (Current)
+## Milestone 10 (Current)
 
-Milestone 9 adds a local risk dashboard + alerting layer:
+Milestone 10 adds local reconciliation and auto-freeze control:
+- `reconciliation-service` with SQLite persistence (`RECON_DB_PATH`)
+- Reconciliation endpoints:
+  - `POST /reconcile/run`
+  - `GET /reconcile/latest`
+  - `GET /reconcile/history`
+- Reconciliation flow:
+  - pulls certificate inventory from `certificate-service` (`GET /certificates`)
+  - computes outstanding claims from `ACTIVE` + `LOCKED` certificates
+  - compares against custody inventory (`CUSTODY_TOTAL_GRAM` or request override)
+  - activates freeze state when abs mismatch breaches `RECON_MISMATCH_THRESHOLD_GRAM`
+- Risk integration:
+  - when freeze is triggered, reconciliation emits `POST /ingest/reconciliation-alert` to `risk-stream`
+  - alert appears in `GET /risk/alerts`
+- Marketplace enforcement:
+  - if `RECONCILIATION_SERVICE_URL` is configured, marketplace write endpoints enforce freeze state
+  - blocked while frozen: `POST /listings/create`, `POST /escrow/lock`, `POST /escrow/settle`
+  - `POST /escrow/cancel` remains allowed for unwind
+
+Milestone 9 risk dashboard + alerting remains active:
 - `risk-stream` service with SQLite persistence (`RISK_DB_PATH`)
 - Ingestion endpoints:
   - `POST /ingest/ledger-event`
   - `POST /ingest/listing-audit-event`
+  - `POST /ingest/reconciliation-alert`
 - Risk query endpoints:
   - `GET /risk/certificates/:certId`
   - `GET /risk/listings/:listingId`
@@ -122,7 +144,7 @@ Milestone 6 marketplace hardening remains active:
   - `ISSUER_PRIVATE_KEY_HEX` must be set for `certificate-service`
   - `CHAIN_PRIVATE_KEY` must be set when `DGC_REGISTRY_ADDRESS` is enabled in `ledger-adapter`
 
-## Run Milestone 9 On Localhost (With Local Chain)
+## Run Milestone 10 On Localhost (With Local Chain)
 
 If `pnpm` is not installed globally, use `corepack pnpm`.
 
@@ -179,6 +201,7 @@ Start marketplace service (terminal 5):
 PORT=4102 \
 CERTIFICATE_SERVICE_URL=http://127.0.0.1:4101 \
 MARKETPLACE_DB_PATH=./data/marketplace-service.db \
+RECONCILIATION_SERVICE_URL=http://127.0.0.1:4105 \
 RISK_STREAM_URL=http://127.0.0.1:4104 \
 corepack pnpm -C services/marketplace-service dev
 ```
@@ -194,11 +217,24 @@ RISK_ALERT_THRESHOLD=60 \
 corepack pnpm -C services/risk-stream dev
 ```
 
+Start reconciliation service (terminal 7):
+
+```bash
+PORT=4105 \
+RECON_DB_PATH=./data/reconciliation-service.db \
+CERTIFICATE_SERVICE_URL=http://127.0.0.1:4101 \
+RISK_STREAM_URL=http://127.0.0.1:4104 \
+CUSTODY_TOTAL_GRAM=0.0000 \
+RECON_MISMATCH_THRESHOLD_GRAM=0.5000 \
+corepack pnpm -C services/reconciliation-service dev
+```
+
 Service URLs:
 - `http://127.0.0.1:4101` (certificate-service)
 - `http://127.0.0.1:4102` (marketplace-service)
 - `http://127.0.0.1:4103` (ledger-adapter)
 - `http://127.0.0.1:4104` (risk-stream)
+- `http://127.0.0.1:4105` (reconciliation-service)
 - `http://127.0.0.1:8545` (Hardhat local chain)
 - `http://127.0.0.1:3000` (web-verifier)
 
@@ -206,6 +242,20 @@ Check chain connectivity from ledger-adapter:
 
 ```bash
 curl http://127.0.0.1:4103/chain/status
+```
+
+Trigger reconciliation run:
+
+```bash
+curl -X POST http://127.0.0.1:4105/reconcile/run \
+  -H "content-type: application/json" \
+  -d '{"inventoryTotalGram":"10.0000"}'
+```
+
+Fetch latest reconciliation + freeze state:
+
+```bash
+curl http://127.0.0.1:4105/reconcile/latest
 ```
 
 Issue certificate:

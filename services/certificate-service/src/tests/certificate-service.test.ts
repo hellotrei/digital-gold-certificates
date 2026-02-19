@@ -146,6 +146,76 @@ test("issue, fetch, and verify certificate", async () => {
   }
 });
 
+test("lists certificates and supports status filter", async () => {
+  const temp = createTempDbPath();
+  const app = await buildServer({ dbPath: temp.dbPath });
+  try {
+    const issue1 = await app.inject({
+      method: "POST",
+      url: "/certificates/issue",
+      payload: {
+        owner: "0xlist-1",
+        amountGram: "1.0000",
+        purity: "999.9",
+      },
+    });
+    assert.equal(issue1.statusCode, 201);
+    const certId1 = (issue1.json() as { certificate: { payload: { certId: string } } }).certificate
+      .payload.certId;
+
+    const issue2 = await app.inject({
+      method: "POST",
+      url: "/certificates/issue",
+      payload: {
+        owner: "0xlist-2",
+        amountGram: "2.0000",
+        purity: "999.9",
+      },
+    });
+    assert.equal(issue2.statusCode, 201);
+    const certId2 = (issue2.json() as { certificate: { payload: { certId: string } } }).certificate
+      .payload.certId;
+    assert.notEqual(certId1, certId2);
+
+    const lockRes = await app.inject({
+      method: "POST",
+      url: "/certificates/status",
+      payload: { certId: certId2, status: "LOCKED" },
+    });
+    assert.equal(lockRes.statusCode, 200);
+
+    const allRes = await app.inject({
+      method: "GET",
+      url: "/certificates",
+    });
+    assert.equal(allRes.statusCode, 200);
+    const allBody = allRes.json() as {
+      certificates: Array<{ payload: { certId: string; status: string } }>;
+    };
+    assert.equal(allBody.certificates.length, 2);
+
+    const activeRes = await app.inject({
+      method: "GET",
+      url: "/certificates?status=ACTIVE",
+    });
+    assert.equal(activeRes.statusCode, 200);
+    const activeBody = activeRes.json() as {
+      certificates: Array<{ payload: { status: string } }>;
+    };
+    assert.equal(activeBody.certificates.length, 1);
+    assert.equal(activeBody.certificates[0]?.payload.status, "ACTIVE");
+
+    const invalidRes = await app.inject({
+      method: "GET",
+      url: "/certificates?status=BAD",
+    });
+    assert.equal(invalidRes.statusCode, 400);
+  } finally {
+    await app.close();
+    rmSync(temp.dir, { recursive: true, force: true });
+  }
+});
+
 test("serves OpenAPI document", async () => {
   const temp = createTempDbPath();
   const app = await buildServer({ dbPath: temp.dbPath });

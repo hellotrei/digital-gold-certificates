@@ -4,6 +4,8 @@ import type {
   GetCertificateRiskResponse,
   GetListingRiskResponse,
   GetRiskAlertsResponse,
+  IngestReconciliationAlertRequest,
+  IngestReconciliationAlertResponse,
   IngestLedgerEventRequest,
   IngestLedgerEventResponse,
   IngestListingAuditEventRequest,
@@ -29,6 +31,10 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
+}
+
+function isAmountGram(value: unknown): value is string {
+  return typeof value === "string" && /^-?\d+(\.\d{1,4})?$/.test(value);
 }
 
 function isValidIsoDate(value: unknown): value is string {
@@ -109,6 +115,26 @@ function parseIngestListingRequest(body: unknown): IngestListingAuditEventReques
   };
 }
 
+function parseIngestReconciliationAlertRequest(
+  body: unknown,
+): IngestReconciliationAlertRequest | null {
+  if (!isObject(body)) return null;
+  if (!isNonEmptyString(body.runId)) return null;
+  if (!isAmountGram(body.mismatchGram)) return null;
+  if (!isAmountGram(body.absMismatchGram)) return null;
+  if (!isAmountGram(body.thresholdGram)) return null;
+  if (typeof body.freezeTriggered !== "boolean") return null;
+  if (!isValidIsoDate(body.createdAt)) return null;
+  return {
+    runId: body.runId,
+    mismatchGram: body.mismatchGram,
+    absMismatchGram: body.absMismatchGram,
+    thresholdGram: body.thresholdGram,
+    freezeTriggered: body.freezeTriggered,
+    createdAt: body.createdAt,
+  };
+}
+
 function toMs(iso: string): number {
   const parsed = Date.parse(iso);
   return Number.isFinite(parsed) ? parsed : 0;
@@ -129,6 +155,14 @@ function computeRiskLevel(score: number): RiskLevel {
 
 function normalizeScore(score: number): number {
   return Math.max(0, Math.min(100, Math.round(score)));
+}
+
+function scoreFromReconciliationAlert(absMismatchGram: string, thresholdGram: string): number {
+  const absMismatch = Math.abs(Number(absMismatchGram));
+  const threshold = Number(thresholdGram);
+  if (!Number.isFinite(absMismatch) || absMismatch <= 0) return 0;
+  if (!Number.isFinite(threshold) || threshold <= 0) return 100;
+  return normalizeScore((absMismatch / threshold) * 100);
 }
 
 function buildCertificateRiskProfile(
@@ -446,6 +480,51 @@ export async function buildServer(options: BuildServerOptions = {}) {
     const response: IngestListingAuditEventResponse = {
       accepted: true,
       listingId: parsed.event.listingId,
+    };
+    return reply.code(202).send(response);
+  });
+
+  app.post("/ingest/reconciliation-alert", async (req, reply) => {
+    const parsed = parseIngestReconciliationAlertRequest(req.body);
+    if (!parsed) {
+      return reply.code(400).send({
+        error: "invalid_request",
+        message:
+          "Expected { runId, mismatchGram, absMismatchGram, thresholdGram, freezeTriggered, createdAt }",
+      });
+    }
+
+    const score = scoreFromReconciliationAlert(parsed.absMismatchGram, parsed.thresholdGram);
+    const level = computeRiskLevel(score);
+    const alert: RiskAlert = {
+      alertId: `ALERT-RECON-${parsed.runId}`,
+      targetType: "RECONCILIATION",
+      targetId: parsed.runId,
+      score,
+      level,
+      reasons: [
+        {
+          code: parsed.freezeTriggered ? "RECON_MISMATCH_THRESHOLD_BREACH" : "RECON_MISMATCH_SIGNAL",
+          scoreImpact: score,
+          message: parsed.freezeTriggered
+            ? "Reconciliation mismatch breached configured threshold"
+            : "Reconciliation mismatch detected",
+          evidence: {
+            mismatchGram: parsed.mismatchGram,
+            absMismatchGram: parsed.absMismatchGram,
+            thresholdGram: parsed.thresholdGram,
+          },
+        },
+      ],
+      createdAt: parsed.createdAt,
+    };
+
+    riskStore.insertAlert(alert);
+    await publishAlert(alert, alertWebhookUrl);
+
+    const response: IngestReconciliationAlertResponse = {
+      accepted: true,
+      alertId: alert.alertId,
     };
     return reply.code(202).send(response);
   });

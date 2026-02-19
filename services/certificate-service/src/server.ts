@@ -7,9 +7,11 @@ import {
   type ChangeCertificateStatusRequest,
   type ChangeCertificateStatusResponse,
   type GetTimelineResponse,
+  type GetCertificateResponse,
   type IssueCertificateRequest,
   type IssueCertificateResponse,
   type LedgerEvent,
+  type ListCertificatesResponse,
   type ProofAnchorRecord,
   type SignedCertificate,
   type SplitCertificateRequest,
@@ -516,6 +518,19 @@ export async function buildServer(options: BuildServerOptions = {}) {
     return response;
   });
 
+  app.get("/certificates", async (req, reply) => {
+    const query = req.query as { status?: string };
+    if (query.status !== undefined && !isCertificateStatus(query.status)) {
+      return reply.code(400).send({
+        error: "invalid_status",
+      });
+    }
+    const response: ListCertificatesResponse = {
+      certificates: certStore.list(query.status as CertificateStatus | undefined),
+    };
+    return response;
+  });
+
   app.get("/certificates/:certId", async (req, reply) => {
     const params = req.params as { certId?: string };
     if (!isNonEmptyString(params.certId)) {
@@ -525,7 +540,8 @@ export async function buildServer(options: BuildServerOptions = {}) {
     if (!certificate) {
       return reply.code(404).send({ error: "certificate_not_found" });
     }
-    return { certificate };
+    const response: GetCertificateResponse = { certificate };
+    return response;
   });
 
   app.get("/certificates/:certId/timeline", async (req, reply) => {

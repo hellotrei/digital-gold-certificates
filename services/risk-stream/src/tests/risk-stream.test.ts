@@ -254,6 +254,46 @@ test("summarizes risk profiles and emits alerts when threshold crossed", async (
   }
 });
 
+test("ingests reconciliation alerts into risk alerts feed", async () => {
+  const temp = createTempDbPath();
+  const app = await buildServer({ dbPath: temp.dbPath });
+  try {
+    const now = new Date().toISOString();
+    const ingest = await app.inject({
+      method: "POST",
+      url: "/ingest/reconciliation-alert",
+      payload: {
+        runId: "RECON-RUN-1",
+        mismatchGram: "1.2500",
+        absMismatchGram: "1.2500",
+        thresholdGram: "0.5000",
+        freezeTriggered: true,
+        createdAt: now,
+      },
+    });
+    assert.equal(ingest.statusCode, 202);
+    const ingestBody = ingest.json() as { accepted: true; alertId: string };
+    assert.equal(ingestBody.accepted, true);
+    assert.equal(ingestBody.alertId, "ALERT-RECON-RECON-RUN-1");
+
+    const alerts = await app.inject({
+      method: "GET",
+      url: "/risk/alerts?limit=10",
+    });
+    assert.equal(alerts.statusCode, 200);
+    const alertsBody = alerts.json() as {
+      alerts: Array<{ targetType: string; targetId: string; score: number }>;
+    };
+    assert.equal(alertsBody.alerts.length, 1);
+    assert.equal(alertsBody.alerts[0]?.targetType, "RECONCILIATION");
+    assert.equal(alertsBody.alerts[0]?.targetId, "RECON-RUN-1");
+    assert.ok((alertsBody.alerts[0]?.score || 0) > 0);
+  } finally {
+    await app.close();
+    rmSync(temp.dir, { recursive: true, force: true });
+  }
+});
+
 test("returns 404 when risk profile does not exist", async () => {
   const temp = createTempDbPath();
   const app = await buildServer({ dbPath: temp.dbPath });

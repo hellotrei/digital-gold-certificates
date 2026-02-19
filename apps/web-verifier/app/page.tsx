@@ -29,6 +29,25 @@ type RiskAlert = {
   createdAt: string;
 };
 
+type LatestReconciliationResponse = {
+  run: {
+    runId: string;
+    createdAt: string;
+    custodyTotalGram: string;
+    outstandingTotalGram: string;
+    mismatchGram: string;
+    absMismatchGram: string;
+    thresholdGram: string;
+    freezeTriggered: boolean;
+  } | null;
+  freezeState: {
+    active: boolean;
+    reason?: string;
+    updatedAt: string;
+    lastRunId?: string;
+  };
+};
+
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<ApiResult<T>> {
   try {
     const response = await fetch(url, {
@@ -209,6 +228,70 @@ function AlertsSection({ result }: { result: ApiResult<{ alerts: RiskAlert[] }> 
   );
 }
 
+function ReconciliationSection({
+  result,
+}: {
+  result: ApiResult<LatestReconciliationResponse> | null;
+}) {
+  if (!result) return null;
+  if (!result.ok) {
+    return (
+      <section>
+        <h2 style={{ marginBottom: 8 }}>Reconciliation</h2>
+        <pre
+          style={{ padding: 12, background: "#f6f6f6", borderRadius: 12, overflowX: "auto" }}
+        >
+          {JSON.stringify(result, null, 2)}
+        </pre>
+      </section>
+    );
+  }
+
+  const data = result.data;
+  if (!data) return null;
+
+  return (
+    <section>
+      <h2 style={{ marginBottom: 8 }}>Reconciliation</h2>
+      <div style={{ padding: 12, background: "#f6f6f6", borderRadius: 12 }}>
+        <div>
+          <strong>Freeze State:</strong>{" "}
+          {data.freezeState.active ? "ACTIVE" : "INACTIVE"}
+        </div>
+        <div>
+          <strong>Updated:</strong> {data.freezeState.updatedAt}
+        </div>
+        {data.freezeState.reason && (
+          <div>
+            <strong>Reason:</strong> {data.freezeState.reason}
+          </div>
+        )}
+        {!data.run ? (
+          <p style={{ marginTop: 8 }}>No reconciliation run yet.</p>
+        ) : (
+          <div style={{ marginTop: 8, display: "grid", gap: 4 }}>
+            <div>
+              <strong>Run:</strong> {data.run.runId}
+            </div>
+            <div>
+              <strong>Outstanding:</strong> {data.run.outstandingTotalGram}g
+            </div>
+            <div>
+              <strong>Custody:</strong> {data.run.custodyTotalGram}g
+            </div>
+            <div>
+              <strong>Mismatch:</strong> {data.run.mismatchGram}g (abs {data.run.absMismatchGram}g)
+            </div>
+            <div>
+              <strong>Threshold:</strong> {data.run.thresholdGram}g
+            </div>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
 export default async function Page({ searchParams }: { searchParams: SearchParams }) {
   const params = await searchParams;
   const certId = params.certId?.trim() || "";
@@ -216,6 +299,8 @@ export default async function Page({ searchParams }: { searchParams: SearchParam
   const certificateServiceUrl =
     process.env.CERTIFICATE_SERVICE_URL || "http://127.0.0.1:4101";
   const riskStreamUrl = process.env.RISK_STREAM_URL || "http://127.0.0.1:4104";
+  const reconciliationServiceUrl =
+    process.env.RECONCILIATION_SERVICE_URL || "http://127.0.0.1:4105";
 
   let certificateResult: ApiResult<unknown> | null = null;
   let verifyResult: ApiResult<unknown> | null = null;
@@ -224,9 +309,11 @@ export default async function Page({ searchParams }: { searchParams: SearchParam
   let listingRiskResult: ApiResult<{ profile: RiskProfileSummary }> | null = null;
   let riskSummaryResult: ApiResult<RiskSummaryResponse> | null = null;
   let riskAlertsResult: ApiResult<{ alerts: RiskAlert[] }> | null = null;
+  let reconciliationResult: ApiResult<LatestReconciliationResponse> | null = null;
 
   riskSummaryResult = await fetchJson(`${riskStreamUrl}/risk/summary?limit=5`);
   riskAlertsResult = await fetchJson(`${riskStreamUrl}/risk/alerts?limit=5`);
+  reconciliationResult = await fetchJson(`${reconciliationServiceUrl}/reconcile/latest`);
 
   if (certId) {
     certificateResult = await fetchJson(
@@ -271,7 +358,7 @@ export default async function Page({ searchParams }: { searchParams: SearchParam
         }}
       >
         <h1>Digital Gold Certificates — Verifier</h1>
-        <p>Milestone 9: risk summary, alerts, and certificate/listing drill-down.</p>
+        <p>Milestone 10: reconciliation, risk summary, alerts, and drill-down.</p>
 
         <form method="GET" style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
           <input
@@ -294,6 +381,7 @@ export default async function Page({ searchParams }: { searchParams: SearchParam
         </form>
 
         <div style={{ display: "grid", gap: 16, marginBottom: 20 }}>
+          <ReconciliationSection result={reconciliationResult} />
           <SummarySection result={riskSummaryResult} />
           <AlertsSection result={riskAlertsResult} />
         </div>

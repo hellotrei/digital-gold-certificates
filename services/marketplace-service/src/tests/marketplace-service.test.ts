@@ -14,7 +14,11 @@ import type {
   TransferCertificateRequest,
   TransferCertificateResponse,
 } from "@dgc/shared";
-import { buildServer, type CertificateClient } from "../server.js";
+import {
+  buildServer,
+  type CertificateClient,
+  type ReconciliationClient,
+} from "../server.js";
 
 function createTempDbPath() {
   const dir = mkdtempSync(join(tmpdir(), "dgc-marketplace-service-"));
@@ -72,6 +76,28 @@ function createCertificateClient(
       return { ok: true, status: 200, data: response };
     },
     ...overrides,
+  };
+}
+
+function createReconciliationClient(
+  freezeActive: () => boolean,
+): ReconciliationClient {
+  return {
+    async getLatest() {
+      const active = freezeActive();
+      return {
+        ok: true,
+        status: 200,
+        data: {
+          run: null,
+          freezeState: {
+            active,
+            reason: active ? "Reconciliation threshold breached" : undefined,
+            updatedAt: "2026-02-19T00:00:00.000Z",
+          },
+        },
+      };
+    },
   };
 }
 
@@ -405,6 +431,93 @@ test("keeps listing data after server restart", async () => {
     assert.equal(getBody.listing.status, "OPEN");
   } finally {
     await app2.close();
+    rmSync(temp.dir, { recursive: true, force: true });
+  }
+});
+
+test("enforces freeze flag for create/lock/settle while allowing cancel", async () => {
+  const temp = createTempDbPath();
+  let frozen = false;
+  const client = createCertificateClient({
+    async getCertificate(certId) {
+      return {
+        ok: true,
+        status: 200,
+        data: { certificate: makeCertificate(certId, "seller-freeze") },
+      };
+    },
+  });
+  const reconciliationClient = createReconciliationClient(() => frozen);
+
+  const app = await buildServer({
+    certificateClient: client,
+    reconciliationClient,
+    dbPath: temp.dbPath,
+  });
+  try {
+    const createOpen = await app.inject({
+      method: "POST",
+      url: "/listings/create",
+      payload: { certId: "DGC-LIST-FRZ-OPEN", seller: "seller-freeze", askPrice: "1000.0000" },
+    });
+    assert.equal(createOpen.statusCode, 201);
+    const openListingId = (createOpen.json() as { listing: MarketplaceListing }).listing.listingId;
+
+    const createLocked = await app.inject({
+      method: "POST",
+      url: "/listings/create",
+      payload: { certId: "DGC-LIST-FRZ-LOCKED", seller: "seller-freeze", askPrice: "1100.0000" },
+    });
+    assert.equal(createLocked.statusCode, 201);
+    const lockedListingId = (createLocked.json() as { listing: MarketplaceListing }).listing
+      .listingId;
+
+    const lockBeforeFreeze = await app.inject({
+      method: "POST",
+      url: "/escrow/lock",
+      headers: { "idempotency-key": "freeze-lock-before" },
+      payload: { listingId: lockedListingId, buyer: "buyer-freeze" },
+    });
+    assert.equal(lockBeforeFreeze.statusCode, 200);
+
+    frozen = true;
+
+    const createBlocked = await app.inject({
+      method: "POST",
+      url: "/listings/create",
+      payload: { certId: "DGC-LIST-FRZ-BLOCKED", seller: "seller-freeze", askPrice: "1200.0000" },
+    });
+    assert.equal(createBlocked.statusCode, 423);
+    assert.equal(createBlocked.json().error, "marketplace_frozen");
+
+    const lockBlocked = await app.inject({
+      method: "POST",
+      url: "/escrow/lock",
+      headers: { "idempotency-key": "freeze-lock-blocked" },
+      payload: { listingId: openListingId, buyer: "buyer-freeze-2" },
+    });
+    assert.equal(lockBlocked.statusCode, 423);
+    assert.equal(lockBlocked.json().error, "marketplace_frozen");
+
+    const settleBlocked = await app.inject({
+      method: "POST",
+      url: "/escrow/settle",
+      headers: { "idempotency-key": "freeze-settle-blocked" },
+      payload: { listingId: lockedListingId, buyer: "buyer-freeze" },
+    });
+    assert.equal(settleBlocked.statusCode, 423);
+    assert.equal(settleBlocked.json().error, "marketplace_frozen");
+
+    const cancelAllowed = await app.inject({
+      method: "POST",
+      url: "/escrow/cancel",
+      headers: { "idempotency-key": "freeze-cancel-allowed" },
+      payload: { listingId: lockedListingId, reason: "manual_risk_unwind" },
+    });
+    assert.equal(cancelAllowed.statusCode, 200);
+    assert.equal(cancelAllowed.json().listing.status, "CANCELLED");
+  } finally {
+    await app.close();
     rmSync(temp.dir, { recursive: true, force: true });
   }
 });
