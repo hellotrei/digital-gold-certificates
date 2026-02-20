@@ -88,7 +88,8 @@ function isListingAuditEvent(value: unknown): value is ListingAuditEvent {
     value.type !== "CREATED" &&
     value.type !== "LOCKED" &&
     value.type !== "SETTLED" &&
-    value.type !== "CANCELLED"
+    value.type !== "CANCELLED" &&
+    value.type !== "DISPUTE_OPENED"
   ) {
     return false;
   }

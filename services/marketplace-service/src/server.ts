@@ -18,6 +18,10 @@ import {
   type LockEscrowRequest,
   type LockEscrowResponse,
   type MarketplaceListing,
+  type OpenDisputeRequest,
+  type OpenDisputeResponse,
+  type OpenListingDisputeRequest,
+  type OpenListingDisputeResponse,
   type SettleEscrowRequest,
   type SettleEscrowResponse,
   sha256Hex,
@@ -32,6 +36,7 @@ import {
 
 const DEFAULT_CERTIFICATE_SERVICE_URL = "http://127.0.0.1:4101";
 const DEFAULT_MARKETPLACE_DB_PATH = "data/marketplace-service.db";
+const DEFAULT_DISPUTE_WINDOW_HOURS = 72;
 const IDEMPOTENCY_HEADER = "idempotency-key";
 
 type EscrowAction = "LOCK_ESCROW" | "SETTLE_ESCROW" | "CANCEL_ESCROW";
@@ -54,6 +59,10 @@ export interface CertificateClient {
 
 export interface ReconciliationClient {
   getLatest(): Promise<HttpResult<GetLatestReconciliationResponse>>;
+}
+
+export interface DisputeClient {
+  openDispute(request: OpenDisputeRequest): Promise<HttpResult<OpenDisputeResponse>>;
 }
 
 class HttpCertificateClient implements CertificateClient {
@@ -93,6 +102,18 @@ class HttpReconciliationClient implements ReconciliationClient {
   async getLatest(): Promise<HttpResult<GetLatestReconciliationResponse>> {
     return requestJson<GetLatestReconciliationResponse>(`${this.baseUrl}/reconcile/latest`, {
       method: "GET",
+    });
+  }
+}
+
+class HttpDisputeClient implements DisputeClient {
+  constructor(private readonly baseUrl: string) {}
+
+  async openDispute(request: OpenDisputeRequest): Promise<HttpResult<OpenDisputeResponse>> {
+    return requestJson<OpenDisputeResponse>(`${this.baseUrl}/disputes/open`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(request),
     });
   }
 }
@@ -162,6 +183,18 @@ function parseCancelEscrowRequest(body: unknown): CancelEscrowRequest | null {
   return {
     listingId: body.listingId,
     reason: body.reason,
+  };
+}
+
+function parseOpenListingDisputeRequest(body: unknown): OpenListingDisputeRequest | null {
+  if (!isObject(body)) return null;
+  if (!isNonEmptyString(body.openedBy)) return null;
+  if (!isNonEmptyString(body.reason)) return null;
+  if (body.evidence !== undefined && !isObject(body.evidence)) return null;
+  return {
+    openedBy: body.openedBy,
+    reason: body.reason,
+    evidence: body.evidence,
   };
 }
 
@@ -277,6 +310,23 @@ function sendCertificateServiceError(reply: FastifyReply, result: HttpResult<unk
   });
 }
 
+function sendDisputeServiceError(reply: FastifyReply, result: HttpResult<unknown>): void {
+  if (result.status === 0) {
+    reply.code(502).send({ error: "dispute_service_unreachable" });
+    return;
+  }
+  reply.code(502).send({
+    error: "dispute_service_error",
+    statusCode: result.status,
+  });
+}
+
+function toMs(value: string | undefined): number {
+  if (!value) return 0;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 async function enforceFreezeGuard(
   reply: FastifyReply,
   reconciliationClient?: ReconciliationClient,
@@ -359,6 +409,9 @@ interface BuildServerOptions {
   certificateServiceUrl?: string;
   reconciliationClient?: ReconciliationClient;
   reconciliationServiceUrl?: string;
+  disputeClient?: DisputeClient;
+  disputeServiceUrl?: string;
+  disputeWindowHours?: number;
   riskStreamUrl?: string;
   listingStore?: ListingStore;
   dbPath?: string;
@@ -388,6 +441,17 @@ export async function buildServer(options: BuildServerOptions = {}) {
     (reconciliationServiceUrl
       ? new HttpReconciliationClient(reconciliationServiceUrl.replace(/\/$/, ""))
       : undefined);
+  const disputeServiceUrl = options.disputeServiceUrl ?? process.env.DISPUTE_SERVICE_URL;
+  const disputeClient =
+    options.disputeClient ||
+    (disputeServiceUrl ? new HttpDisputeClient(disputeServiceUrl.replace(/\/$/, "")) : undefined);
+  const disputeWindowHoursRaw =
+    options.disputeWindowHours ??
+    Number(process.env.DISPUTE_WINDOW_HOURS || DEFAULT_DISPUTE_WINDOW_HOURS);
+  const disputeWindowHours =
+    Number.isFinite(disputeWindowHoursRaw) && disputeWindowHoursRaw > 0
+      ? disputeWindowHoursRaw
+      : DEFAULT_DISPUTE_WINDOW_HOURS;
   const riskStreamUrl = options.riskStreamUrl ?? process.env.RISK_STREAM_URL;
 
   app.get("/health", async () => ({ ok: true, service: "marketplace-service" }));
@@ -761,6 +825,91 @@ export async function buildServer(options: BuildServerOptions = {}) {
       200,
       response,
     );
+    return response;
+  });
+
+  app.post("/listings/:listingId/dispute/open", async (req, reply) => {
+    if (!disputeClient) {
+      return reply.code(503).send({ error: "dispute_service_not_configured" });
+    }
+
+    const params = req.params as { listingId?: string };
+    const parsed = parseOpenListingDisputeRequest(req.body);
+    if (!isNonEmptyString(params.listingId) || !parsed) {
+      return reply.code(400).send({
+        error: "invalid_request",
+        message: "Expected listingId param with openedBy, reason and optional evidence object",
+      });
+    }
+
+    const listing = listingStore.getListing(params.listingId);
+    if (!listing) {
+      return reply.code(404).send({ error: "listing_not_found" });
+    }
+    if (listing.status !== "SETTLED") {
+      return reply.code(409).send({
+        error: "state_conflict",
+        message: "Only SETTLED listings can open disputes",
+      });
+    }
+    if (listing.underDispute && listing.disputeStatus !== "RESOLVED") {
+      return reply.code(409).send({
+        error: "state_conflict",
+        message: "Listing already has an active dispute",
+      });
+    }
+
+    const settledAtMs = toMs(listing.settledAt || listing.updatedAt);
+    const disputeWindowMs = disputeWindowHours * 60 * 60 * 1000;
+    if (settledAtMs <= 0 || Date.now() - settledAtMs > disputeWindowMs) {
+      return reply.code(409).send({
+        error: "dispute_window_expired",
+        message: `Dispute can only be opened within ${disputeWindowHours} hours after settlement`,
+      });
+    }
+
+    const disputeResult = await disputeClient.openDispute({
+      listingId: listing.listingId,
+      certId: listing.certId,
+      openedBy: parsed.openedBy,
+      reason: parsed.reason,
+      evidence: parsed.evidence,
+    });
+    if (!disputeResult.ok) {
+      sendDisputeServiceError(reply, disputeResult);
+      return;
+    }
+
+    const dispute = disputeResult.data?.dispute;
+    if (!dispute) {
+      return reply.code(502).send({ error: "dispute_service_invalid_response" });
+    }
+
+    const updated: MarketplaceListing = {
+      ...listing,
+      underDispute: true,
+      disputeId: dispute.disputeId,
+      disputeStatus: dispute.status,
+      disputeOpenedAt: dispute.openedAt,
+      updatedAt: new Date().toISOString(),
+    };
+    listingStore.putListing(updated);
+    const auditEvent = writeAuditEvent(
+      listingStore,
+      updated.listingId,
+      "DISPUTE_OPENED",
+      parsed.openedBy,
+      {
+        disputeId: dispute.disputeId,
+        reason: parsed.reason,
+      },
+    );
+    await tryPublishListingAuditEvent(riskStreamUrl, auditEvent, updated);
+
+    const response: OpenListingDisputeResponse = {
+      listing: updated,
+      dispute,
+    };
     return response;
   });
 

@@ -96,7 +96,12 @@ export interface ChangeCertificateStatusResponse {
 }
 
 export type ListingStatus = "OPEN" | "LOCKED" | "SETTLED" | "CANCELLED";
-export type ListingAuditEventType = "CREATED" | "LOCKED" | "SETTLED" | "CANCELLED";
+export type ListingAuditEventType =
+  | "CREATED"
+  | "LOCKED"
+  | "SETTLED"
+  | "CANCELLED"
+  | "DISPUTE_OPENED";
 
 export interface MarketplaceListing {
   listingId: string;
@@ -112,6 +117,11 @@ export interface MarketplaceListing {
   settledPrice?: string;
   cancelledAt?: string;
   cancelReason?: string;
+  underDispute?: boolean;
+  disputeId?: string;
+  disputeStatus?: "OPEN" | "ASSIGNED" | "RESOLVED";
+  disputeOpenedAt?: string;
+  disputeResolvedAt?: string;
 }
 
 export interface ListingAuditEvent {
@@ -173,6 +183,17 @@ export interface CancelEscrowRequest {
 
 export interface CancelEscrowResponse {
   listing: MarketplaceListing;
+}
+
+export interface OpenListingDisputeRequest {
+  openedBy: string;
+  reason: string;
+  evidence?: Record<string, unknown>;
+}
+
+export interface OpenListingDisputeResponse {
+  listing: MarketplaceListing;
+  dispute: DisputeRecord;
 }
 
 export interface RecordLedgerEventRequest {

@@ -7,6 +7,8 @@ import type {
   CertificateStatus,
   ChangeCertificateStatusRequest,
   ChangeCertificateStatusResponse,
+  OpenDisputeRequest,
+  OpenDisputeResponse,
   ListListingsResponse,
   ListingAuditEvent,
   MarketplaceListing,
@@ -17,6 +19,7 @@ import type {
 import {
   buildServer,
   type CertificateClient,
+  type DisputeClient,
   type ReconciliationClient,
 } from "../server.js";
 
@@ -98,6 +101,30 @@ function createReconciliationClient(
         },
       };
     },
+  };
+}
+
+function createDisputeClient(
+  overrides: Partial<DisputeClient> = {},
+): DisputeClient {
+  return {
+    async openDispute(request: OpenDisputeRequest) {
+      const now = new Date().toISOString();
+      const response: OpenDisputeResponse = {
+        dispute: {
+          disputeId: "DSP-MOCK-001",
+          listingId: request.listingId,
+          certId: request.certId,
+          status: "OPEN",
+          openedBy: request.openedBy,
+          reason: request.reason,
+          evidence: request.evidence,
+          openedAt: now,
+        },
+      };
+      return { ok: true, status: 201, data: response };
+    },
+    ...overrides,
   };
 }
 
@@ -516,6 +543,88 @@ test("enforces freeze flag for create/lock/settle while allowing cancel", async 
     });
     assert.equal(cancelAllowed.statusCode, 200);
     assert.equal(cancelAllowed.json().listing.status, "CANCELLED");
+  } finally {
+    await app.close();
+    rmSync(temp.dir, { recursive: true, force: true });
+  }
+});
+
+test("opens dispute for settled listing and sets underDispute soft state", async () => {
+  const temp = createTempDbPath();
+  const client = createCertificateClient({
+    async getCertificate(certId) {
+      return {
+        ok: true,
+        status: 200,
+        data: { certificate: makeCertificate(certId, "seller-dispute") },
+      };
+    },
+  });
+  const disputeClient = createDisputeClient();
+  const app = await buildServer({
+    certificateClient: client,
+    disputeClient,
+    dbPath: temp.dbPath,
+  });
+  try {
+    const createRes = await app.inject({
+      method: "POST",
+      url: "/listings/create",
+      payload: { certId: "DGC-LIST-DSP-1", seller: "seller-dispute", askPrice: "999.0000" },
+    });
+    assert.equal(createRes.statusCode, 201);
+    const listingId = (createRes.json() as { listing: MarketplaceListing }).listing.listingId;
+
+    const openBeforeSettle = await app.inject({
+      method: "POST",
+      url: `/listings/${encodeURIComponent(listingId)}/dispute/open`,
+      payload: { openedBy: "buyer-dispute", reason: "not_received" },
+    });
+    assert.equal(openBeforeSettle.statusCode, 409);
+    assert.equal(openBeforeSettle.json().error, "state_conflict");
+
+    await app.inject({
+      method: "POST",
+      url: "/escrow/lock",
+      headers: { "idempotency-key": "dsp-lock-1" },
+      payload: { listingId, buyer: "buyer-dispute" },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/escrow/settle",
+      headers: { "idempotency-key": "dsp-settle-1" },
+      payload: { listingId, buyer: "buyer-dispute", settledPrice: "990.0000" },
+    });
+
+    const openRes = await app.inject({
+      method: "POST",
+      url: `/listings/${encodeURIComponent(listingId)}/dispute/open`,
+      payload: { openedBy: "buyer-dispute", reason: "delayed_delivery", evidence: { proof: "x" } },
+    });
+    assert.equal(openRes.statusCode, 200);
+    const openBody = openRes.json() as {
+      listing: MarketplaceListing;
+      dispute: { disputeId: string; status: string };
+    };
+    assert.equal(openBody.listing.underDispute, true);
+    assert.equal(openBody.listing.disputeStatus, "OPEN");
+    assert.equal(typeof openBody.listing.disputeId, "string");
+    assert.equal(openBody.dispute.status, "OPEN");
+
+    const auditRes = await app.inject({
+      method: "GET",
+      url: `/listings/${encodeURIComponent(listingId)}/audit`,
+    });
+    assert.equal(auditRes.statusCode, 200);
+    const auditBody = auditRes.json() as { events: ListingAuditEvent[] };
+    assert.ok(auditBody.events.some((event) => event.type === "DISPUTE_OPENED"));
+
+    const duplicateOpen = await app.inject({
+      method: "POST",
+      url: `/listings/${encodeURIComponent(listingId)}/dispute/open`,
+      payload: { openedBy: "buyer-dispute", reason: "duplicate" },
+    });
+    assert.equal(duplicateOpen.statusCode, 409);
   } finally {
     await app.close();
     rmSync(temp.dir, { recursive: true, force: true });
