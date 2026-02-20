@@ -60,6 +60,7 @@ flowchart LR
 - `services/marketplace-service/` listing, escrow, settlement logic
 - `services/risk-stream/` event-driven risk scoring pipeline
 - `services/reconciliation-service/` custody-vs-claims reconciliation and freeze control
+- `services/dispute-service/` dispute intake, assignment, and resolution lifecycle
 - `apps/web-verifier/` public certificate verifier UI (Next.js)
 - `packages/shared/` shared crypto utilities and domain types
 - `docs/whitepaper/` whitepaper and supporting docs
@@ -82,14 +83,29 @@ Run tests:
 pnpm -C contracts test
 ```
 
-## Milestone 10 (Current)
+## Milestone 11 (Current)
 
-Milestone 10 adds local reconciliation and auto-freeze control:
+Milestone 11 adds dispute orchestration and governance controls:
+- `dispute-service` with SQLite persistence (`DISPUTE_DB_PATH`)
+- Dispute lifecycle endpoints:
+  - `POST /disputes/open`
+  - `POST /disputes/:disputeId/assign`
+  - `POST /disputes/:disputeId/resolve`
+  - `GET /disputes/:disputeId`
+  - `GET /disputes?status=OPEN|ASSIGNED|RESOLVED`
+- Marketplace dispute integration:
+  - `POST /listings/:listingId/dispute/open` (SETTLED listings only, within dispute window)
+  - listing soft state: `underDispute`, `disputeId`, `disputeStatus`
+  - publishes `DISPUTE_OPENED` audit event
+
+Milestone 10 reconciliation and auto-freeze remains active:
 - `reconciliation-service` with SQLite persistence (`RECON_DB_PATH`)
 - Reconciliation endpoints:
   - `POST /reconcile/run`
   - `GET /reconcile/latest`
   - `GET /reconcile/history`
+  - `POST /freeze/unfreeze`
+  - `GET /freeze/overrides`
 - Reconciliation flow:
   - pulls certificate inventory from `certificate-service` (`GET /certificates`)
   - computes outstanding claims from `ACTIVE` + `LOCKED` certificates
@@ -102,6 +118,9 @@ Milestone 10 adds local reconciliation and auto-freeze control:
   - if `RECONCILIATION_SERVICE_URL` is configured, marketplace write endpoints enforce freeze state
   - blocked while frozen: `POST /listings/create`, `POST /escrow/lock`, `POST /escrow/settle`
   - `POST /escrow/cancel` remains allowed for unwind
+- Governance override:
+  - manual unfreeze can be executed with actor+reason (`POST /freeze/unfreeze`)
+  - override history is auditable (`GET /freeze/overrides`)
 
 Milestone 9 risk dashboard + alerting remains active:
 - `risk-stream` service with SQLite persistence (`RISK_DB_PATH`)
@@ -144,7 +163,7 @@ Milestone 6 marketplace hardening remains active:
   - `ISSUER_PRIVATE_KEY_HEX` must be set for `certificate-service`
   - `CHAIN_PRIVATE_KEY` must be set when `DGC_REGISTRY_ADDRESS` is enabled in `ledger-adapter`
 
-## Run Milestone 10 On Localhost (With Local Chain)
+## Run Milestone 11 On Localhost (With Local Chain)
 
 If `pnpm` is not installed globally, use `corepack pnpm`.
 
@@ -202,6 +221,7 @@ PORT=4102 \
 CERTIFICATE_SERVICE_URL=http://127.0.0.1:4101 \
 MARKETPLACE_DB_PATH=./data/marketplace-service.db \
 RECONCILIATION_SERVICE_URL=http://127.0.0.1:4105 \
+DISPUTE_SERVICE_URL=http://127.0.0.1:4106 \
 RISK_STREAM_URL=http://127.0.0.1:4104 \
 corepack pnpm -C services/marketplace-service dev
 ```
@@ -229,12 +249,21 @@ RECON_MISMATCH_THRESHOLD_GRAM=0.5000 \
 corepack pnpm -C services/reconciliation-service dev
 ```
 
+Start dispute service (terminal 8):
+
+```bash
+PORT=4106 \
+DISPUTE_DB_PATH=./data/dispute-service.db \
+corepack pnpm -C services/dispute-service dev
+```
+
 Service URLs:
 - `http://127.0.0.1:4101` (certificate-service)
 - `http://127.0.0.1:4102` (marketplace-service)
 - `http://127.0.0.1:4103` (ledger-adapter)
 - `http://127.0.0.1:4104` (risk-stream)
 - `http://127.0.0.1:4105` (reconciliation-service)
+- `http://127.0.0.1:4106` (dispute-service)
 - `http://127.0.0.1:8545` (Hardhat local chain)
 - `http://127.0.0.1:3000` (web-verifier)
 
@@ -256,6 +285,20 @@ Fetch latest reconciliation + freeze state:
 
 ```bash
 curl http://127.0.0.1:4105/reconcile/latest
+```
+
+Manual unfreeze override with audit trail:
+
+```bash
+curl -X POST http://127.0.0.1:4105/freeze/unfreeze \
+  -H "content-type: application/json" \
+  -d '{"actor":"ops-admin","reason":"false_positive"}'
+```
+
+List freeze override history:
+
+```bash
+curl http://127.0.0.1:4105/freeze/overrides?limit=10
 ```
 
 Issue certificate:

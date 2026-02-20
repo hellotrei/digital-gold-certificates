@@ -48,6 +48,31 @@ type LatestReconciliationResponse = {
   };
 };
 
+type DisputeRecordSummary = {
+  disputeId: string;
+  listingId: string;
+  certId: string;
+  status: "OPEN" | "ASSIGNED" | "RESOLVED";
+  openedBy: string;
+  reason: string;
+  openedAt: string;
+  assignedTo?: string;
+  resolvedBy?: string;
+  resolvedAt?: string;
+  resolution?: string;
+};
+
+type FreezeOverrideRecord = {
+  overrideId: string;
+  action: "UNFREEZE";
+  actor: string;
+  reason: string;
+  previousActive: boolean;
+  nextActive: boolean;
+  createdAt: string;
+  runId?: string;
+};
+
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<ApiResult<T>> {
   try {
     const response = await fetch(url, {
@@ -292,6 +317,78 @@ function ReconciliationSection({
   );
 }
 
+function DisputesSection({ result }: { result: ApiResult<{ disputes: DisputeRecordSummary[] }> | null }) {
+  if (!result) return null;
+  if (!result.ok) {
+    return (
+      <section>
+        <h2 style={{ marginBottom: 8 }}>Disputes</h2>
+        <pre
+          style={{ padding: 12, background: "#f6f6f6", borderRadius: 12, overflowX: "auto" }}
+        >
+          {JSON.stringify(result, null, 2)}
+        </pre>
+      </section>
+    );
+  }
+
+  const disputes = result.data?.disputes || [];
+  return (
+    <section>
+      <h2 style={{ marginBottom: 8 }}>Disputes (Read-only)</h2>
+      {disputes.length === 0 ? (
+        <p>No disputes found.</p>
+      ) : (
+        <ul>
+          {disputes.map((dispute) => (
+            <li key={dispute.disputeId}>
+              {dispute.disputeId} - {dispute.status} - {dispute.listingId} - {dispute.reason}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function FreezeOverridesSection({
+  result,
+}: {
+  result: ApiResult<{ overrides: FreezeOverrideRecord[] }> | null;
+}) {
+  if (!result) return null;
+  if (!result.ok) {
+    return (
+      <section>
+        <h2 style={{ marginBottom: 8 }}>Freeze Overrides</h2>
+        <pre
+          style={{ padding: 12, background: "#f6f6f6", borderRadius: 12, overflowX: "auto" }}
+        >
+          {JSON.stringify(result, null, 2)}
+        </pre>
+      </section>
+    );
+  }
+
+  const overrides = result.data?.overrides || [];
+  return (
+    <section>
+      <h2 style={{ marginBottom: 8 }}>Freeze Overrides (Read-only)</h2>
+      {overrides.length === 0 ? (
+        <p>No manual freeze overrides yet.</p>
+      ) : (
+        <ul>
+          {overrides.map((override) => (
+            <li key={override.overrideId}>
+              {override.action} by {override.actor} - {override.reason} ({override.createdAt})
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 export default async function Page({ searchParams }: { searchParams: SearchParams }) {
   const params = await searchParams;
   const certId = params.certId?.trim() || "";
@@ -301,6 +398,7 @@ export default async function Page({ searchParams }: { searchParams: SearchParam
   const riskStreamUrl = process.env.RISK_STREAM_URL || "http://127.0.0.1:4104";
   const reconciliationServiceUrl =
     process.env.RECONCILIATION_SERVICE_URL || "http://127.0.0.1:4105";
+  const disputeServiceUrl = process.env.DISPUTE_SERVICE_URL || "http://127.0.0.1:4106";
 
   let certificateResult: ApiResult<unknown> | null = null;
   let verifyResult: ApiResult<unknown> | null = null;
@@ -310,10 +408,14 @@ export default async function Page({ searchParams }: { searchParams: SearchParam
   let riskSummaryResult: ApiResult<RiskSummaryResponse> | null = null;
   let riskAlertsResult: ApiResult<{ alerts: RiskAlert[] }> | null = null;
   let reconciliationResult: ApiResult<LatestReconciliationResponse> | null = null;
+  let disputesResult: ApiResult<{ disputes: DisputeRecordSummary[] }> | null = null;
+  let freezeOverridesResult: ApiResult<{ overrides: FreezeOverrideRecord[] }> | null = null;
 
   riskSummaryResult = await fetchJson(`${riskStreamUrl}/risk/summary?limit=5`);
   riskAlertsResult = await fetchJson(`${riskStreamUrl}/risk/alerts?limit=5`);
   reconciliationResult = await fetchJson(`${reconciliationServiceUrl}/reconcile/latest`);
+  disputesResult = await fetchJson(`${disputeServiceUrl}/disputes`);
+  freezeOverridesResult = await fetchJson(`${reconciliationServiceUrl}/freeze/overrides?limit=5`);
 
   if (certId) {
     certificateResult = await fetchJson(
@@ -358,7 +460,7 @@ export default async function Page({ searchParams }: { searchParams: SearchParam
         }}
       >
         <h1>Digital Gold Certificates — Verifier</h1>
-        <p>Milestone 10: reconciliation, risk summary, alerts, and drill-down.</p>
+        <p>Milestone 11: disputes, freeze history, reconciliation, risk summary, and drill-down.</p>
 
         <form method="GET" style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
           <input
@@ -381,6 +483,8 @@ export default async function Page({ searchParams }: { searchParams: SearchParam
         </form>
 
         <div style={{ display: "grid", gap: 16, marginBottom: 20 }}>
+          <DisputesSection result={disputesResult} />
+          <FreezeOverridesSection result={freezeOverridesResult} />
           <ReconciliationSection result={reconciliationResult} />
           <SummarySection result={riskSummaryResult} />
           <AlertsSection result={riskAlertsResult} />
