@@ -317,3 +317,61 @@ export interface IngestReconciliationAlertResponse {
   accepted: true;
   alertId: string;
 }
+
+export type DisputeStatus = "OPEN" | "ASSIGNED" | "RESOLVED";
+export type DisputeResolution = "REFUND_BUYER" | "RELEASE_SELLER" | "MANUAL_REVIEW";
+
+export interface DisputeRecord {
+  disputeId: string;
+  listingId: string;
+  certId: string;
+  status: DisputeStatus;
+  openedBy: string;
+  reason: string;
+  evidence?: Record<string, unknown>;
+  openedAt: string;
+  assignedTo?: string;
+  assignedAt?: string;
+  resolvedBy?: string;
+  resolvedAt?: string;
+  resolution?: DisputeResolution;
+  resolutionNotes?: string;
+}
+
+export interface OpenDisputeRequest {
+  listingId: string;
+  certId: string;
+  openedBy: string;
+  reason: string;
+  evidence?: Record<string, unknown>;
+}
+
+export interface OpenDisputeResponse {
+  dispute: DisputeRecord;
+}
+
+export interface AssignDisputeRequest {
+  assignee: string;
+}
+
+export interface AssignDisputeResponse {
+  dispute: DisputeRecord;
+}
+
+export interface ResolveDisputeRequest {
+  resolvedBy: string;
+  resolution: DisputeResolution;
+  resolutionNotes?: string;
+}
+
+export interface ResolveDisputeResponse {
+  dispute: DisputeRecord;
+}
+
+export interface GetDisputeResponse {
+  dispute: DisputeRecord;
+}
+
+export interface ListDisputesResponse {
+  disputes: DisputeRecord[];
+}
