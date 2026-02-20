@@ -220,3 +220,69 @@ test("returns 502 when certificate service is unavailable", async () => {
     rmSync(temp.dir, { recursive: true, force: true });
   }
 });
+
+test("manual unfreeze writes override audit history", async () => {
+  const temp = createTempDbPath();
+  const certificateMock = createCertificateServiceMock([
+    certificate("CERT-5", "2.0000", "ACTIVE"),
+  ]);
+  const certificateServiceUrl = await listen(certificateMock);
+  const app = await buildServer({
+    dbPath: temp.dbPath,
+    certificateServiceUrl,
+    custodyTotalGram: "1.0000",
+    mismatchThresholdGram: "0.5000",
+  });
+
+  try {
+    const runRes = await app.inject({
+      method: "POST",
+      url: "/reconcile/run",
+      payload: {},
+    });
+    assert.equal(runRes.statusCode, 200);
+    assert.equal(runRes.json().freezeState.active, true);
+
+    const unfreezeRes = await app.inject({
+      method: "POST",
+      url: "/freeze/unfreeze",
+      payload: {
+        actor: "ops-admin-1",
+        reason: "false_positive_reconciliation",
+      },
+    });
+    assert.equal(unfreezeRes.statusCode, 200);
+    const unfreezeBody = unfreezeRes.json() as {
+      freezeState: { active: boolean; reason?: string };
+      override: { action: string; actor: string; reason: string };
+    };
+    assert.equal(unfreezeBody.freezeState.active, false);
+    assert.equal(unfreezeBody.override.action, "UNFREEZE");
+    assert.equal(unfreezeBody.override.actor, "ops-admin-1");
+
+    const overrideHistoryRes = await app.inject({
+      method: "GET",
+      url: "/freeze/overrides?limit=10",
+    });
+    assert.equal(overrideHistoryRes.statusCode, 200);
+    const overrideHistoryBody = overrideHistoryRes.json() as {
+      overrides: Array<{ action: string; actor: string; reason: string }>;
+    };
+    assert.equal(overrideHistoryBody.overrides.length, 1);
+    assert.equal(overrideHistoryBody.overrides[0]?.action, "UNFREEZE");
+
+    const unfreezeAgain = await app.inject({
+      method: "POST",
+      url: "/freeze/unfreeze",
+      payload: {
+        actor: "ops-admin-1",
+        reason: "should_fail",
+      },
+    });
+    assert.equal(unfreezeAgain.statusCode, 409);
+  } finally {
+    await app.close();
+    await closeServer(certificateMock);
+    rmSync(temp.dir, { recursive: true, force: true });
+  }
+});

@@ -325,6 +325,31 @@ export interface ListReconciliationHistoryResponse {
   runs: ReconciliationRun[];
 }
 
+export interface FreezeOverrideRecord {
+  overrideId: string;
+  action: "UNFREEZE";
+  actor: string;
+  reason: string;
+  previousActive: boolean;
+  nextActive: boolean;
+  createdAt: string;
+  runId?: string;
+}
+
+export interface ManualUnfreezeRequest {
+  actor: string;
+  reason: string;
+}
+
+export interface ManualUnfreezeResponse {
+  freezeState: FreezeState;
+  override: FreezeOverrideRecord;
+}
+
+export interface ListFreezeOverridesResponse {
+  overrides: FreezeOverrideRecord[];
+}
+
 export interface IngestReconciliationAlertRequest {
   runId: string;
   mismatchGram: string;

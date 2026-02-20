@@ -2,10 +2,14 @@ import { randomUUID } from "node:crypto";
 import Fastify from "fastify";
 import type {
   FreezeState,
+  FreezeOverrideRecord,
   GetLatestReconciliationResponse,
   IngestReconciliationAlertRequest,
+  ListFreezeOverridesResponse,
   ListCertificatesResponse,
   ListReconciliationHistoryResponse,
+  ManualUnfreezeRequest,
+  ManualUnfreezeResponse,
   ReconciliationRun,
   RunReconciliationRequest,
   RunReconciliationResponse,
@@ -18,6 +22,7 @@ const DEFAULT_CERTIFICATE_SERVICE_URL = "http://127.0.0.1:4101";
 const DEFAULT_CUSTODY_TOTAL_GRAM = "0.0000";
 const DEFAULT_MISMATCH_THRESHOLD_GRAM = "0.5000";
 const DEFAULT_HISTORY_LIMIT = 20;
+const DEFAULT_OVERRIDE_HISTORY_LIMIT = 20;
 const AMOUNT_SCALE = 10000n;
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -60,6 +65,16 @@ function parseLimit(value: unknown, fallback: number): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
   return Math.min(Math.floor(parsed), 100);
+}
+
+function parseManualUnfreezeRequest(body: unknown): ManualUnfreezeRequest | null {
+  if (!isObject(body)) return null;
+  if (typeof body.actor !== "string" || body.actor.trim() === "") return null;
+  if (typeof body.reason !== "string" || body.reason.trim() === "") return null;
+  return {
+    actor: body.actor,
+    reason: body.reason,
+  };
 }
 
 function buildRun(
@@ -252,6 +267,60 @@ export async function buildServer(options: BuildServerOptions = {}) {
     const limit = parseLimit(query.limit, DEFAULT_HISTORY_LIMIT);
     const response: ListReconciliationHistoryResponse = {
       runs: reconciliationStore.listRuns(limit),
+    };
+    return response;
+  });
+
+  app.post("/freeze/unfreeze", async (req, reply) => {
+    const parsed = parseManualUnfreezeRequest(req.body);
+    if (!parsed) {
+      return reply.code(400).send({
+        error: "invalid_request",
+        message: "Expected actor and reason",
+      });
+    }
+
+    const current = reconciliationStore.getFreezeState();
+    if (!current.active) {
+      return reply.code(409).send({
+        error: "state_conflict",
+        message: "Freeze state is already inactive",
+      });
+    }
+
+    const createdAt = new Date().toISOString();
+    const overrideRecord: FreezeOverrideRecord = {
+      overrideId: `FOVR-${createdAt.replace(/[:.]/g, "")}-${randomUUID().split("-")[0]}`,
+      action: "UNFREEZE",
+      actor: parsed.actor,
+      reason: parsed.reason,
+      previousActive: true,
+      nextActive: false,
+      createdAt,
+      runId: current.lastRunId,
+    };
+
+    const freezeState: FreezeState = {
+      active: false,
+      reason: `Manual unfreeze by ${parsed.actor}: ${parsed.reason}`,
+      updatedAt: createdAt,
+      lastRunId: current.lastRunId,
+    };
+    reconciliationStore.setFreezeState(freezeState);
+    reconciliationStore.insertFreezeOverride(overrideRecord);
+
+    const response: ManualUnfreezeResponse = {
+      freezeState,
+      override: overrideRecord,
+    };
+    return response;
+  });
+
+  app.get("/freeze/overrides", async (req) => {
+    const query = req.query as { limit?: string };
+    const limit = parseLimit(query.limit, DEFAULT_OVERRIDE_HISTORY_LIMIT);
+    const response: ListFreezeOverridesResponse = {
+      overrides: reconciliationStore.listFreezeOverrides(limit),
     };
     return response;
   });

@@ -1,7 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import Database from "better-sqlite3";
-import type { FreezeState, ReconciliationRun } from "@dgc/shared";
+import type { FreezeOverrideRecord, FreezeState, ReconciliationRun } from "@dgc/shared";
 
 interface RunRow {
   run_json: string;
@@ -14,12 +14,18 @@ interface FreezeRow {
   last_run_id: string | null;
 }
 
+interface FreezeOverrideRow {
+  override_json: string;
+}
+
 export interface ReconciliationStore {
   insertRun(run: ReconciliationRun): void;
   getLatestRun(): ReconciliationRun | null;
   listRuns(limit: number): ReconciliationRun[];
   setFreezeState(state: FreezeState): void;
   getFreezeState(): FreezeState;
+  insertFreezeOverride(overrideRecord: FreezeOverrideRecord): void;
+  listFreezeOverrides(limit: number): FreezeOverrideRecord[];
   close(): void;
 }
 
@@ -30,6 +36,10 @@ export class SqliteReconciliationStore implements ReconciliationStore {
   private readonly listRunsStmt: Database.Statement<[number], RunRow>;
   private readonly upsertFreezeStateStmt: Database.Statement<[number, string | null, string, string | null]>;
   private readonly getFreezeStateStmt: Database.Statement<[], FreezeRow>;
+  private readonly insertFreezeOverrideStmt: Database.Statement<
+    [string, string, string, string, number, number, string, string | null, string]
+  >;
+  private readonly listFreezeOverridesStmt: Database.Statement<[number], FreezeOverrideRow>;
 
   constructor(dbPath: string) {
     mkdirSync(dirname(dbPath), { recursive: true });
@@ -59,6 +69,20 @@ export class SqliteReconciliationStore implements ReconciliationStore {
         updated_at TEXT NOT NULL,
         last_run_id TEXT
       );
+
+      CREATE TABLE IF NOT EXISTS reconciliation_freeze_overrides (
+        override_id TEXT PRIMARY KEY,
+        action TEXT NOT NULL,
+        actor TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        previous_active INTEGER NOT NULL,
+        next_active INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        run_id TEXT,
+        override_json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_reconciliation_freeze_overrides_created_at
+      ON reconciliation_freeze_overrides(created_at DESC);
     `);
 
     this.insertRunStmt = this.db.prepare(`
@@ -109,6 +133,28 @@ export class SqliteReconciliationStore implements ReconciliationStore {
       WHERE singleton_id = 1
       LIMIT 1
     `) as Database.Statement<[], FreezeRow>;
+
+    this.insertFreezeOverrideStmt = this.db.prepare(`
+      INSERT INTO reconciliation_freeze_overrides (
+        override_id,
+        action,
+        actor,
+        reason,
+        previous_active,
+        next_active,
+        created_at,
+        run_id,
+        override_json
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    this.listFreezeOverridesStmt = this.db.prepare(`
+      SELECT override_json
+      FROM reconciliation_freeze_overrides
+      ORDER BY created_at DESC
+      LIMIT ?
+    `) as Database.Statement<[number], FreezeOverrideRow>;
 
     const existing = this.getFreezeStateStmt.get();
     if (!existing) {
@@ -168,6 +214,25 @@ export class SqliteReconciliationStore implements ReconciliationStore {
       updatedAt: row.updated_at,
       lastRunId: row.last_run_id || undefined,
     };
+  }
+
+  insertFreezeOverride(overrideRecord: FreezeOverrideRecord): void {
+    this.insertFreezeOverrideStmt.run(
+      overrideRecord.overrideId,
+      overrideRecord.action,
+      overrideRecord.actor,
+      overrideRecord.reason,
+      overrideRecord.previousActive ? 1 : 0,
+      overrideRecord.nextActive ? 1 : 0,
+      overrideRecord.createdAt,
+      overrideRecord.runId || null,
+      JSON.stringify(overrideRecord),
+    );
+  }
+
+  listFreezeOverrides(limit: number): FreezeOverrideRecord[] {
+    const rows = this.listFreezeOverridesStmt.all(limit);
+    return rows.map((row) => JSON.parse(row.override_json) as FreezeOverrideRecord);
   }
 
   close(): void {
