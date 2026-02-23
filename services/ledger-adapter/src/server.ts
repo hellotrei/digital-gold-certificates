@@ -1,6 +1,9 @@
 import Fastify from "fastify";
 import {
+  buildServiceAuthHeaders,
   canonicalJson,
+  isServiceAuthAuthorized,
+  SERVICE_AUTH_HEADER,
   sha256Hex,
   type LedgerEvent,
   type AnchorProofRequest,
@@ -19,6 +22,7 @@ import {
 interface BuildServerOptions {
   chainWriter?: ChainWriter | null;
   riskStreamUrl?: string;
+  serviceAuthToken?: string;
 }
 
 interface StoredEvent {
@@ -88,12 +92,14 @@ function isRecordLedgerEventRequest(body: unknown): body is RecordLedgerEventReq
 async function tryPublishRiskEvent(
   riskStreamUrl: string | undefined,
   event: LedgerEvent,
+  serviceAuthToken: string | undefined,
 ): Promise<void> {
   if (!riskStreamUrl) return;
   try {
+    const authHeaders = buildServiceAuthHeaders(serviceAuthToken);
     await fetch(`${riskStreamUrl.replace(/\/$/, "")}/ingest/ledger-event`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { ...authHeaders, "content-type": "application/json" },
       body: JSON.stringify({ event }),
       signal: AbortSignal.timeout(3000),
     });
@@ -109,6 +115,18 @@ export async function buildServer(options: BuildServerOptions = {}) {
   const chainWriter =
     options.chainWriter === undefined ? buildChainWriterFromEnv() : options.chainWriter;
   const riskStreamUrl = options.riskStreamUrl ?? process.env.RISK_STREAM_URL;
+  const serviceAuthToken = options.serviceAuthToken ?? process.env.SERVICE_AUTH_TOKEN;
+
+  function requireServiceAuth(req: { headers: Record<string, unknown> }, reply: { code: (statusCode: number) => { send: (payload: unknown) => void } }): boolean {
+    if (isServiceAuthAuthorized(req.headers[SERVICE_AUTH_HEADER], serviceAuthToken)) {
+      return true;
+    }
+    reply.code(401).send({
+      error: "unauthorized_service",
+      message: `Missing or invalid '${SERVICE_AUTH_HEADER}' header`,
+    });
+    return false;
+  }
 
   app.get("/health", async () => ({ ok: true, service: "ledger-adapter" }));
 
@@ -121,6 +139,10 @@ export async function buildServer(options: BuildServerOptions = {}) {
   });
 
   app.post("/proofs/anchor", async (req, reply) => {
+    if (!requireServiceAuth(req as { headers: Record<string, unknown> }, reply)) {
+      return;
+    }
+
     if (!isAnchorProofRequest(req.body)) {
       return reply.code(400).send({
         error: "invalid_request",
@@ -166,6 +188,10 @@ export async function buildServer(options: BuildServerOptions = {}) {
   });
 
   app.post("/events/record", async (req, reply) => {
+    if (!requireServiceAuth(req as { headers: Record<string, unknown> }, reply)) {
+      return;
+    }
+
     if (!isRecordLedgerEventRequest(req.body)) {
       return reply.code(400).send({
         error: "invalid_request",
@@ -207,7 +233,7 @@ export async function buildServer(options: BuildServerOptions = {}) {
       ledgerTxRef,
     };
 
-    await tryPublishRiskEvent(riskStreamUrl, event);
+    await tryPublishRiskEvent(riskStreamUrl, event, serviceAuthToken);
     return reply.code(201).send(response);
   });
 

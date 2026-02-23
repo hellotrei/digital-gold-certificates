@@ -97,6 +97,10 @@ Milestone 11 adds dispute orchestration and governance controls:
   - `POST /listings/:listingId/dispute/open` (SETTLED listings only, within dispute window)
   - listing soft state: `underDispute`, `disputeId`, `disputeStatus`
   - publishes `DISPUTE_OPENED` audit event
+- Inter-service authentication (optional hardening):
+  - shared secret via `SERVICE_AUTH_TOKEN`
+  - callers send `x-service-token: <SERVICE_AUTH_TOKEN>`
+  - when enabled, protected write/ingest routes reject unauthorized requests with `401`
 
 Milestone 10 reconciliation and auto-freeze remains active:
 - `reconciliation-service` with SQLite persistence (`RECON_DB_PATH`)
@@ -191,6 +195,7 @@ Prepare environment keys (terminal 3):
 ```bash
 export ISSUER_PRIVATE_KEY_HEX="$(openssl rand -hex 32)"
 export CHAIN_PRIVATE_KEY="<YOUR_LOCAL_CHAIN_PRIVATE_KEY>"
+export SERVICE_AUTH_TOKEN="<SHARED_SERVICE_SECRET>"
 ```
 
 Start ledger adapter with chain config (terminal 3):
@@ -201,6 +206,7 @@ CHAIN_RPC_URL=http://127.0.0.1:8545 \
 CHAIN_PRIVATE_KEY=<YOUR_LOCAL_CHAIN_PRIVATE_KEY> \
 DGC_REGISTRY_ADDRESS=<PASTE_DEPLOYED_ADDRESS> \
 RISK_STREAM_URL=http://127.0.0.1:4104 \
+SERVICE_AUTH_TOKEN=$SERVICE_AUTH_TOKEN \
 corepack pnpm -C services/ledger-adapter dev
 ```
 
@@ -211,6 +217,7 @@ PORT=4101 \
 ISSUER_PRIVATE_KEY_HEX=<YOUR_ISSUER_PRIVATE_KEY_HEX> \
 CERT_DB_PATH=./data/certificate-service.db \
 LEDGER_ADAPTER_URL=http://127.0.0.1:4103 \
+SERVICE_AUTH_TOKEN=$SERVICE_AUTH_TOKEN \
 corepack pnpm -C services/certificate-service dev
 ```
 
@@ -223,6 +230,7 @@ MARKETPLACE_DB_PATH=./data/marketplace-service.db \
 RECONCILIATION_SERVICE_URL=http://127.0.0.1:4105 \
 DISPUTE_SERVICE_URL=http://127.0.0.1:4106 \
 RISK_STREAM_URL=http://127.0.0.1:4104 \
+SERVICE_AUTH_TOKEN=$SERVICE_AUTH_TOKEN \
 corepack pnpm -C services/marketplace-service dev
 ```
 
@@ -232,6 +240,7 @@ Start risk-stream service (terminal 6):
 PORT=4104 \
 RISK_DB_PATH=./data/risk-stream.db \
 RISK_ALERT_THRESHOLD=60 \
+SERVICE_AUTH_TOKEN=$SERVICE_AUTH_TOKEN \
 # optional: push alerts to a webhook
 # RISK_ALERT_WEBHOOK_URL=http://127.0.0.1:9999/alerts \
 corepack pnpm -C services/risk-stream dev
@@ -246,6 +255,7 @@ CERTIFICATE_SERVICE_URL=http://127.0.0.1:4101 \
 RISK_STREAM_URL=http://127.0.0.1:4104 \
 CUSTODY_TOTAL_GRAM=0.0000 \
 RECON_MISMATCH_THRESHOLD_GRAM=0.5000 \
+SERVICE_AUTH_TOKEN=$SERVICE_AUTH_TOKEN \
 corepack pnpm -C services/reconciliation-service dev
 ```
 
@@ -254,6 +264,7 @@ Start dispute service (terminal 8):
 ```bash
 PORT=4106 \
 DISPUTE_DB_PATH=./data/dispute-service.db \
+SERVICE_AUTH_TOKEN=$SERVICE_AUTH_TOKEN \
 corepack pnpm -C services/dispute-service dev
 ```
 
@@ -266,6 +277,12 @@ Service URLs:
 - `http://127.0.0.1:4106` (dispute-service)
 - `http://127.0.0.1:8545` (Hardhat local chain)
 - `http://127.0.0.1:3000` (web-verifier)
+
+If `SERVICE_AUTH_TOKEN` is enabled, include this header for protected endpoints:
+
+```bash
+-H "x-service-token: $SERVICE_AUTH_TOKEN"
+```
 
 Check chain connectivity from ledger-adapter:
 

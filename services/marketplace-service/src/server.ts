@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import Fastify from "fastify";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import {
+  buildServiceAuthHeaders,
   type CancelEscrowRequest,
   type CancelEscrowResponse,
   canonicalJson,
@@ -66,21 +67,26 @@ export interface DisputeClient {
 }
 
 class HttpCertificateClient implements CertificateClient {
-  constructor(private readonly baseUrl: string) {}
+  constructor(
+    private readonly baseUrl: string,
+    private readonly serviceAuthToken?: string,
+  ) {}
 
   async getCertificate(certId: string): Promise<HttpResult<{ certificate: SignedCertificate }>> {
+    const authHeaders = buildServiceAuthHeaders(this.serviceAuthToken);
     return requestJson<{ certificate: SignedCertificate }>(
       `${this.baseUrl}/certificates/${encodeURIComponent(certId)}`,
-      { method: "GET" },
+      { method: "GET", headers: authHeaders },
     );
   }
 
   async changeStatus(
     request: ChangeCertificateStatusRequest,
   ): Promise<HttpResult<ChangeCertificateStatusResponse>> {
+    const authHeaders = buildServiceAuthHeaders(this.serviceAuthToken);
     return requestJson<ChangeCertificateStatusResponse>(`${this.baseUrl}/certificates/status`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { ...authHeaders, "content-type": "application/json" },
       body: JSON.stringify(request),
     });
   }
@@ -88,31 +94,41 @@ class HttpCertificateClient implements CertificateClient {
   async transfer(
     request: TransferCertificateRequest,
   ): Promise<HttpResult<TransferCertificateResponse>> {
+    const authHeaders = buildServiceAuthHeaders(this.serviceAuthToken);
     return requestJson<TransferCertificateResponse>(`${this.baseUrl}/certificates/transfer`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { ...authHeaders, "content-type": "application/json" },
       body: JSON.stringify(request),
     });
   }
 }
 
 class HttpReconciliationClient implements ReconciliationClient {
-  constructor(private readonly baseUrl: string) {}
+  constructor(
+    private readonly baseUrl: string,
+    private readonly serviceAuthToken?: string,
+  ) {}
 
   async getLatest(): Promise<HttpResult<GetLatestReconciliationResponse>> {
+    const authHeaders = buildServiceAuthHeaders(this.serviceAuthToken);
     return requestJson<GetLatestReconciliationResponse>(`${this.baseUrl}/reconcile/latest`, {
       method: "GET",
+      headers: authHeaders,
     });
   }
 }
 
 class HttpDisputeClient implements DisputeClient {
-  constructor(private readonly baseUrl: string) {}
+  constructor(
+    private readonly baseUrl: string,
+    private readonly serviceAuthToken?: string,
+  ) {}
 
   async openDispute(request: OpenDisputeRequest): Promise<HttpResult<OpenDisputeResponse>> {
+    const authHeaders = buildServiceAuthHeaders(this.serviceAuthToken);
     return requestJson<OpenDisputeResponse>(`${this.baseUrl}/disputes/open`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { ...authHeaders, "content-type": "application/json" },
       body: JSON.stringify(request),
     });
   }
@@ -240,12 +256,14 @@ async function tryPublishListingAuditEvent(
   riskStreamUrl: string | undefined,
   event: ListingAuditEvent,
   listing: MarketplaceListing,
+  serviceAuthToken: string | undefined,
 ): Promise<void> {
   if (!riskStreamUrl) return;
   try {
+    const authHeaders = buildServiceAuthHeaders(serviceAuthToken);
     await fetch(`${riskStreamUrl.replace(/\/$/, "")}/ingest/listing-audit-event`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { ...authHeaders, "content-type": "application/json" },
       body: JSON.stringify({ event, listing }),
       signal: AbortSignal.timeout(3000),
     });
@@ -415,6 +433,7 @@ interface BuildServerOptions {
   riskStreamUrl?: string;
   listingStore?: ListingStore;
   dbPath?: string;
+  serviceAuthToken?: string;
 }
 
 export async function buildServer(options: BuildServerOptions = {}) {
@@ -425,6 +444,7 @@ export async function buildServer(options: BuildServerOptions = {}) {
       options.dbPath || process.env.MARKETPLACE_DB_PATH || DEFAULT_MARKETPLACE_DB_PATH,
     );
   const ownListingStore = !options.listingStore;
+  const serviceAuthToken = options.serviceAuthToken ?? process.env.SERVICE_AUTH_TOKEN;
 
   const certificateClient =
     options.certificateClient ||
@@ -433,18 +453,24 @@ export async function buildServer(options: BuildServerOptions = {}) {
         process.env.CERTIFICATE_SERVICE_URL ||
         DEFAULT_CERTIFICATE_SERVICE_URL
       ).replace(/\/$/, ""),
+      serviceAuthToken,
     );
   const reconciliationServiceUrl =
     options.reconciliationServiceUrl ?? process.env.RECONCILIATION_SERVICE_URL;
   const reconciliationClient =
     options.reconciliationClient ||
     (reconciliationServiceUrl
-      ? new HttpReconciliationClient(reconciliationServiceUrl.replace(/\/$/, ""))
+      ? new HttpReconciliationClient(
+          reconciliationServiceUrl.replace(/\/$/, ""),
+          serviceAuthToken,
+        )
       : undefined);
   const disputeServiceUrl = options.disputeServiceUrl ?? process.env.DISPUTE_SERVICE_URL;
   const disputeClient =
     options.disputeClient ||
-    (disputeServiceUrl ? new HttpDisputeClient(disputeServiceUrl.replace(/\/$/, "")) : undefined);
+    (disputeServiceUrl
+      ? new HttpDisputeClient(disputeServiceUrl.replace(/\/$/, ""), serviceAuthToken)
+      : undefined);
   const disputeWindowHoursRaw =
     options.disputeWindowHours ??
     Number(process.env.DISPUTE_WINDOW_HOURS || DEFAULT_DISPUTE_WINDOW_HOURS);
@@ -510,7 +536,7 @@ export async function buildServer(options: BuildServerOptions = {}) {
       certId: parsed.certId,
       askPrice: parsed.askPrice,
     });
-    await tryPublishListingAuditEvent(riskStreamUrl, auditEvent, listing);
+    await tryPublishListingAuditEvent(riskStreamUrl, auditEvent, listing, serviceAuthToken);
 
     const response: CreateListingResponse = { listing };
     return reply.code(201).send(response);
@@ -624,7 +650,7 @@ export async function buildServer(options: BuildServerOptions = {}) {
       fromStatus: current.status,
       toStatus: updated.status,
     });
-    await tryPublishListingAuditEvent(riskStreamUrl, auditEvent, updated);
+    await tryPublishListingAuditEvent(riskStreamUrl, auditEvent, updated, serviceAuthToken);
 
     const response: LockEscrowResponse = { listing: updated };
     saveIdempotentResponse(
@@ -730,7 +756,7 @@ export async function buildServer(options: BuildServerOptions = {}) {
       toStatus: updated.status,
       settledPrice,
     });
-    await tryPublishListingAuditEvent(riskStreamUrl, auditEvent, updated);
+    await tryPublishListingAuditEvent(riskStreamUrl, auditEvent, updated, serviceAuthToken);
 
     const response: SettleEscrowResponse = {
       listing: updated,
@@ -814,7 +840,7 @@ export async function buildServer(options: BuildServerOptions = {}) {
       toStatus: updated.status,
       reason: parsed.reason,
     });
-    await tryPublishListingAuditEvent(riskStreamUrl, auditEvent, updated);
+    await tryPublishListingAuditEvent(riskStreamUrl, auditEvent, updated, serviceAuthToken);
 
     const response: CancelEscrowResponse = { listing: updated };
     saveIdempotentResponse(
@@ -904,7 +930,7 @@ export async function buildServer(options: BuildServerOptions = {}) {
         reason: parsed.reason,
       },
     );
-    await tryPublishListingAuditEvent(riskStreamUrl, auditEvent, updated);
+    await tryPublishListingAuditEvent(riskStreamUrl, auditEvent, updated, serviceAuthToken);
 
     const response: OpenListingDisputeResponse = {
       listing: updated,

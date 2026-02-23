@@ -13,6 +13,7 @@ import type {
   ResolveDisputeRequest,
   ResolveDisputeResponse,
 } from "@dgc/shared";
+import { isServiceAuthAuthorized, SERVICE_AUTH_HEADER } from "@dgc/shared";
 import { SqliteDisputeStore, type DisputeStore } from "./storage/dispute-store.js";
 
 const DEFAULT_DISPUTE_DB_PATH = "data/dispute-service.db";
@@ -74,6 +75,7 @@ function disputeIdNow(): string {
 interface BuildServerOptions {
   disputeStore?: DisputeStore;
   dbPath?: string;
+  serviceAuthToken?: string;
 }
 
 export async function buildServer(options: BuildServerOptions = {}) {
@@ -82,10 +84,29 @@ export async function buildServer(options: BuildServerOptions = {}) {
     options.disputeStore ||
     new SqliteDisputeStore(options.dbPath || process.env.DISPUTE_DB_PATH || DEFAULT_DISPUTE_DB_PATH);
   const ownStore = !options.disputeStore;
+  const serviceAuthToken = options.serviceAuthToken ?? process.env.SERVICE_AUTH_TOKEN;
+
+  function requireServiceAuth(
+    req: { headers: Record<string, unknown> },
+    reply: { code: (statusCode: number) => { send: (payload: unknown) => void } },
+  ): boolean {
+    if (isServiceAuthAuthorized(req.headers[SERVICE_AUTH_HEADER], serviceAuthToken)) {
+      return true;
+    }
+    reply.code(401).send({
+      error: "unauthorized_service",
+      message: `Missing or invalid '${SERVICE_AUTH_HEADER}' header`,
+    });
+    return false;
+  }
 
   app.get("/health", async () => ({ ok: true, service: "dispute-service" }));
 
   app.post("/disputes/open", async (req, reply) => {
+    if (!requireServiceAuth(req as { headers: Record<string, unknown> }, reply)) {
+      return;
+    }
+
     const parsed = parseOpenDisputeRequest(req.body);
     if (!parsed) {
       return reply.code(400).send({
@@ -111,6 +132,10 @@ export async function buildServer(options: BuildServerOptions = {}) {
   });
 
   app.post("/disputes/:disputeId/assign", async (req, reply) => {
+    if (!requireServiceAuth(req as { headers: Record<string, unknown> }, reply)) {
+      return;
+    }
+
     const params = req.params as { disputeId?: string };
     const parsed = parseAssignDisputeRequest(req.body);
     if (!isNonEmptyString(params.disputeId) || !parsed) {
@@ -143,6 +168,10 @@ export async function buildServer(options: BuildServerOptions = {}) {
   });
 
   app.post("/disputes/:disputeId/resolve", async (req, reply) => {
+    if (!requireServiceAuth(req as { headers: Record<string, unknown> }, reply)) {
+      return;
+    }
+
     const params = req.params as { disputeId?: string };
     const parsed = parseResolveDisputeRequest(req.body);
     if (!isNonEmptyString(params.disputeId) || !parsed) {

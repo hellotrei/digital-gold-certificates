@@ -18,6 +18,7 @@ import type {
   RiskReason,
   RiskSummaryResponse,
 } from "@dgc/shared";
+import { isServiceAuthAuthorized, SERVICE_AUTH_HEADER } from "@dgc/shared";
 import { SqliteRiskStore, type RiskStore } from "./storage/risk-store.js";
 
 const DEFAULT_RISK_DB_PATH = "data/risk-stream.db";
@@ -421,6 +422,7 @@ async function recalculateListingProfile(
 interface BuildServerOptions {
   riskStore?: RiskStore;
   dbPath?: string;
+  serviceAuthToken?: string;
 }
 
 export async function buildServer(options: BuildServerOptions = {}) {
@@ -434,10 +436,29 @@ export async function buildServer(options: BuildServerOptions = {}) {
     ? Math.max(0, Math.min(100, alertThresholdRaw))
     : DEFAULT_ALERT_THRESHOLD;
   const alertWebhookUrl = process.env.RISK_ALERT_WEBHOOK_URL;
+  const serviceAuthToken = options.serviceAuthToken ?? process.env.SERVICE_AUTH_TOKEN;
+
+  function requireServiceAuth(
+    req: { headers: Record<string, unknown> },
+    reply: { code: (statusCode: number) => { send: (payload: unknown) => void } },
+  ): boolean {
+    if (isServiceAuthAuthorized(req.headers[SERVICE_AUTH_HEADER], serviceAuthToken)) {
+      return true;
+    }
+    reply.code(401).send({
+      error: "unauthorized_service",
+      message: `Missing or invalid '${SERVICE_AUTH_HEADER}' header`,
+    });
+    return false;
+  }
 
   app.get("/health", async () => ({ ok: true, service: "risk-stream" }));
 
   app.post("/ingest/ledger-event", async (req, reply) => {
+    if (!requireServiceAuth(req as { headers: Record<string, unknown> }, reply)) {
+      return;
+    }
+
     const parsed = parseIngestLedgerRequest(req.body);
     if (!parsed) {
       return reply.code(400).send({
@@ -461,6 +482,10 @@ export async function buildServer(options: BuildServerOptions = {}) {
   });
 
   app.post("/ingest/listing-audit-event", async (req, reply) => {
+    if (!requireServiceAuth(req as { headers: Record<string, unknown> }, reply)) {
+      return;
+    }
+
     const parsed = parseIngestListingRequest(req.body);
     if (!parsed) {
       return reply.code(400).send({
@@ -486,6 +511,10 @@ export async function buildServer(options: BuildServerOptions = {}) {
   });
 
   app.post("/ingest/reconciliation-alert", async (req, reply) => {
+    if (!requireServiceAuth(req as { headers: Record<string, unknown> }, reply)) {
+      return;
+    }
+
     const parsed = parseIngestReconciliationAlertRequest(req.body);
     if (!parsed) {
       return reply.code(400).send({

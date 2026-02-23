@@ -31,10 +31,22 @@ function certificate(certId: string, amountGram: string, status: SignedCertifica
   };
 }
 
-function createCertificateServiceMock(certificates: SignedCertificate[]): Server {
+function createCertificateServiceMock(
+  certificates: SignedCertificate[],
+  expectedServiceToken?: string,
+): Server {
   return createServer((req, res) => {
     const url = new URL(req.url || "/", "http://127.0.0.1");
     if (req.method === "GET" && url.pathname === "/certificates") {
+      if (expectedServiceToken) {
+        const header = req.headers["x-service-token"];
+        const actual = Array.isArray(header) ? header[0] : header;
+        if (actual !== expectedServiceToken) {
+          res.statusCode = 401;
+          res.end();
+          return;
+        }
+      }
       res.statusCode = 200;
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify({ certificates }));
@@ -45,10 +57,19 @@ function createCertificateServiceMock(certificates: SignedCertificate[]): Server
   });
 }
 
-function createRiskStreamMock(received: unknown[]): Server {
+function createRiskStreamMock(received: unknown[], expectedServiceToken?: string): Server {
   return createServer((req, res) => {
     const url = new URL(req.url || "/", "http://127.0.0.1");
     if (req.method === "POST" && url.pathname === "/ingest/reconciliation-alert") {
+      if (expectedServiceToken) {
+        const header = req.headers["x-service-token"];
+        const actual = Array.isArray(header) ? header[0] : header;
+        if (actual !== expectedServiceToken) {
+          res.statusCode = 401;
+          res.end();
+          return;
+        }
+      }
       let body = "";
       req.on("data", (chunk) => {
         body += String(chunk);
@@ -283,6 +304,63 @@ test("manual unfreeze writes override audit history", async () => {
   } finally {
     await app.close();
     await closeServer(certificateMock);
+    rmSync(temp.dir, { recursive: true, force: true });
+  }
+});
+
+test("enforces service auth token on reconcile endpoints and outbound calls", async () => {
+  const temp = createTempDbPath();
+  const serviceToken = "svc-secret";
+  const postedAlerts: unknown[] = [];
+  const certificateMock = createCertificateServiceMock(
+    [certificate("CERT-AUTH-1", "2.0000", "ACTIVE")],
+    serviceToken,
+  );
+  const riskMock = createRiskStreamMock(postedAlerts, serviceToken);
+  const certificateServiceUrl = await listen(certificateMock);
+  const riskStreamUrl = await listen(riskMock);
+  const app = await buildServer({
+    dbPath: temp.dbPath,
+    certificateServiceUrl,
+    riskStreamUrl,
+    custodyTotalGram: "1.0000",
+    mismatchThresholdGram: "0.5000",
+    serviceAuthToken: serviceToken,
+  });
+
+  try {
+    const unauthorizedRun = await app.inject({
+      method: "POST",
+      url: "/reconcile/run",
+      payload: {},
+    });
+    assert.equal(unauthorizedRun.statusCode, 401);
+
+    const authorizedRun = await app.inject({
+      method: "POST",
+      url: "/reconcile/run",
+      headers: { "x-service-token": serviceToken },
+      payload: {},
+    });
+    assert.equal(authorizedRun.statusCode, 200);
+    assert.equal(postedAlerts.length, 1);
+
+    const latestUnauthorized = await app.inject({
+      method: "GET",
+      url: "/reconcile/latest",
+    });
+    assert.equal(latestUnauthorized.statusCode, 401);
+
+    const latestAuthorized = await app.inject({
+      method: "GET",
+      url: "/reconcile/latest",
+      headers: { "x-service-token": serviceToken },
+    });
+    assert.equal(latestAuthorized.statusCode, 200);
+  } finally {
+    await app.close();
+    await closeServer(certificateMock);
+    await closeServer(riskMock);
     rmSync(temp.dir, { recursive: true, force: true });
   }
 });

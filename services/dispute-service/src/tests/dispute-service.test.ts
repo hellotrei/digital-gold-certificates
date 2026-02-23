@@ -111,3 +111,34 @@ test("opens, assigns, resolves, gets and lists disputes", async () => {
     rmSync(temp.dir, { recursive: true, force: true });
   }
 });
+
+test("enforces service auth token on write endpoints when configured", async () => {
+  const temp = createTempDbPath();
+  const app = await buildServer({ dbPath: temp.dbPath, serviceAuthToken: "svc-secret" });
+  try {
+    const payload = {
+      listingId: "LST-AUTH-1",
+      certId: "DGC-AUTH-1",
+      openedBy: "buyer-auth",
+      reason: "test_auth",
+    };
+
+    const unauthorized = await app.inject({
+      method: "POST",
+      url: "/disputes/open",
+      payload,
+    });
+    assert.equal(unauthorized.statusCode, 401);
+
+    const authorized = await app.inject({
+      method: "POST",
+      url: "/disputes/open",
+      headers: { "x-service-token": "svc-secret" },
+      payload,
+    });
+    assert.equal(authorized.statusCode, 201);
+  } finally {
+    await app.close();
+    rmSync(temp.dir, { recursive: true, force: true });
+  }
+});

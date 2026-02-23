@@ -17,11 +17,20 @@ function createTempDbPath() {
   };
 }
 
-function createLedgerMockServer() {
+function createLedgerMockServer(expectedServiceToken?: string) {
   const timelines = new Map<string, Array<Record<string, unknown>>>();
 
   return createServer((req, res) => {
     const url = new URL(req.url || "/", "http://127.0.0.1");
+    if (expectedServiceToken) {
+      const header = req.headers["x-service-token"];
+      const actual = Array.isArray(header) ? header[0] : header;
+      if (actual !== expectedServiceToken) {
+        res.statusCode = 401;
+        res.end();
+        return;
+      }
+    }
     if (req.method === "POST" && url.pathname === "/proofs/anchor") {
       let body = "";
       req.on("data", (chunk) => {
@@ -372,6 +381,42 @@ test("anchors proof when ledger adapter URL is configured", async () => {
   }
 });
 
+test("forwards service auth token to ledger adapter when configured", async () => {
+  const temp = createTempDbPath();
+  const serviceToken = "svc-secret";
+  const ledgerMock = createLedgerMockServer(serviceToken);
+
+  await new Promise<void>((resolve) => ledgerMock.listen(0, "127.0.0.1", resolve));
+  const address = ledgerMock.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  const app = await buildServer({
+    dbPath: temp.dbPath,
+    ledgerAdapterUrl: `http://127.0.0.1:${port}`,
+    serviceAuthToken: serviceToken,
+  });
+
+  try {
+    const issueRes = await app.inject({
+      method: "POST",
+      url: "/certificates/issue",
+      payload: {
+        owner: "0xauth-anchor",
+        amountGram: "1.0000",
+        purity: "999.9",
+      },
+    });
+
+    assert.equal(issueRes.statusCode, 201);
+    const body = issueRes.json() as { proofAnchorStatus: string; eventWriteStatus: string };
+    assert.equal(body.proofAnchorStatus, "ANCHORED");
+    assert.equal(body.eventWriteStatus, "RECORDED");
+  } finally {
+    await app.close();
+    await new Promise<void>((resolve) => ledgerMock.close(() => resolve()));
+    rmSync(temp.dir, { recursive: true, force: true });
+  }
+});
+
 test("transfers ACTIVE certificate and records timeline event", async () => {
   const temp = createTempDbPath();
   const ledgerMock = createLedgerMockServer();
@@ -550,6 +595,50 @@ test("rejects invalid status transition", async () => {
       },
     });
     assert.equal(backToActive.statusCode, 409);
+  } finally {
+    await app.close();
+    rmSync(temp.dir, { recursive: true, force: true });
+  }
+});
+
+test("enforces service auth token on service write endpoints when configured", async () => {
+  const temp = createTempDbPath();
+  const app = await buildServer({ dbPath: temp.dbPath, serviceAuthToken: "svc-secret" });
+  try {
+    const issueRes = await app.inject({
+      method: "POST",
+      url: "/certificates/issue",
+      payload: {
+        owner: "0xauthholder",
+        amountGram: "1.0000",
+        purity: "999.9",
+      },
+    });
+    assert.equal(issueRes.statusCode, 201);
+    const certId = (
+      issueRes.json() as { certificate: { payload: { certId: string } } }
+    ).certificate.payload.certId;
+
+    const unauthorized = await app.inject({
+      method: "POST",
+      url: "/certificates/status",
+      payload: {
+        certId,
+        status: "LOCKED",
+      },
+    });
+    assert.equal(unauthorized.statusCode, 401);
+
+    const authorized = await app.inject({
+      method: "POST",
+      url: "/certificates/status",
+      headers: { "x-service-token": "svc-secret" },
+      payload: {
+        certId,
+        status: "LOCKED",
+      },
+    });
+    assert.equal(authorized.statusCode, 200);
   } finally {
     await app.close();
     rmSync(temp.dir, { recursive: true, force: true });

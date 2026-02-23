@@ -181,3 +181,39 @@ test("records event with chain tx ref when chain writer exists", async () => {
     await app.close();
   }
 });
+
+test("enforces service auth token on write endpoints when configured", async () => {
+  const app = await buildServer({ serviceAuthToken: "svc-secret" });
+  try {
+    const unauthorized = await app.inject({
+      method: "POST",
+      url: "/events/record",
+      payload: {
+        event: {
+          type: "STATUS_CHANGED",
+          certId: "DGC-AUTH-001",
+          occurredAt: "2026-02-11T00:00:00.000Z",
+          status: "LOCKED",
+        },
+      },
+    });
+    assert.equal(unauthorized.statusCode, 401);
+
+    const authorized = await app.inject({
+      method: "POST",
+      url: "/events/record",
+      headers: { "x-service-token": "svc-secret" },
+      payload: {
+        event: {
+          type: "STATUS_CHANGED",
+          certId: "DGC-AUTH-001",
+          occurredAt: "2026-02-11T00:00:00.000Z",
+          status: "LOCKED",
+        },
+      },
+    });
+    assert.equal(authorized.statusCode, 201);
+  } finally {
+    await app.close();
+  }
+});

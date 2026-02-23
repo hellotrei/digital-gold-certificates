@@ -15,6 +15,11 @@ import type {
   RunReconciliationResponse,
   SignedCertificate,
 } from "@dgc/shared";
+import {
+  buildServiceAuthHeaders,
+  isServiceAuthAuthorized,
+  SERVICE_AUTH_HEADER,
+} from "@dgc/shared";
 import { SqliteReconciliationStore, type ReconciliationStore } from "./storage/reconciliation-store.js";
 
 const DEFAULT_RECON_DB_PATH = "data/reconciliation-service.db";
@@ -119,8 +124,13 @@ function buildRun(
   };
 }
 
-async function fetchCertificates(certificateServiceUrl: string): Promise<SignedCertificate[]> {
+async function fetchCertificates(
+  certificateServiceUrl: string,
+  serviceAuthToken: string | undefined,
+): Promise<SignedCertificate[]> {
+  const authHeaders = buildServiceAuthHeaders(serviceAuthToken);
   const response = await fetch(`${certificateServiceUrl.replace(/\/$/, "")}/certificates`, {
+    headers: authHeaders,
     signal: AbortSignal.timeout(5000),
   });
   if (!response.ok) {
@@ -136,6 +146,7 @@ async function fetchCertificates(certificateServiceUrl: string): Promise<SignedC
 async function publishReconciliationAlert(
   riskStreamUrl: string,
   run: ReconciliationRun,
+  serviceAuthToken: string | undefined,
 ): Promise<void> {
   const payload: IngestReconciliationAlertRequest = {
     runId: run.runId,
@@ -145,9 +156,10 @@ async function publishReconciliationAlert(
     freezeTriggered: run.freezeTriggered,
     createdAt: run.createdAt,
   };
+  const authHeaders = buildServiceAuthHeaders(serviceAuthToken);
   await fetch(`${riskStreamUrl.replace(/\/$/, "")}/ingest/reconciliation-alert`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { ...authHeaders, "content-type": "application/json" },
     body: JSON.stringify(payload),
     signal: AbortSignal.timeout(5000),
   });
@@ -171,6 +183,7 @@ interface BuildServerOptions {
   riskStreamUrl?: string;
   custodyTotalGram?: string;
   mismatchThresholdGram?: string;
+  serviceAuthToken?: string;
 }
 
 export async function buildServer(options: BuildServerOptions = {}) {
@@ -186,6 +199,7 @@ export async function buildServer(options: BuildServerOptions = {}) {
     process.env.CERTIFICATE_SERVICE_URL ||
     DEFAULT_CERTIFICATE_SERVICE_URL;
   const riskStreamUrl = options.riskStreamUrl ?? process.env.RISK_STREAM_URL;
+  const serviceAuthToken = options.serviceAuthToken ?? process.env.SERVICE_AUTH_TOKEN;
   const configuredCustodyTotalGram =
     options.custodyTotalGram || process.env.CUSTODY_TOTAL_GRAM || DEFAULT_CUSTODY_TOTAL_GRAM;
   const configuredMismatchThresholdGram =
@@ -195,9 +209,27 @@ export async function buildServer(options: BuildServerOptions = {}) {
   parseAmountGramScaled(configuredCustodyTotalGram);
   parseAmountGramScaled(configuredMismatchThresholdGram);
 
+  function requireServiceAuth(
+    req: { headers: Record<string, unknown> },
+    reply: { code: (statusCode: number) => { send: (payload: unknown) => void } },
+  ): boolean {
+    if (isServiceAuthAuthorized(req.headers[SERVICE_AUTH_HEADER], serviceAuthToken)) {
+      return true;
+    }
+    reply.code(401).send({
+      error: "unauthorized_service",
+      message: `Missing or invalid '${SERVICE_AUTH_HEADER}' header`,
+    });
+    return false;
+  }
+
   app.get("/health", async () => ({ ok: true, service: "reconciliation-service" }));
 
   app.post("/reconcile/run", async (req, reply) => {
+    if (!requireServiceAuth(req as { headers: Record<string, unknown> }, reply)) {
+      return;
+    }
+
     const parsed = parseRunRequest(req.body);
     if (!parsed) {
       return reply.code(400).send({
@@ -217,7 +249,7 @@ export async function buildServer(options: BuildServerOptions = {}) {
 
     let certificates: SignedCertificate[];
     try {
-      certificates = await fetchCertificates(certificateServiceUrl);
+      certificates = await fetchCertificates(certificateServiceUrl, serviceAuthToken);
     } catch (error) {
       return reply.code(502).send({
         error: "certificate_service_unavailable",
@@ -241,7 +273,7 @@ export async function buildServer(options: BuildServerOptions = {}) {
 
     if (run.freezeTriggered && riskStreamUrl) {
       try {
-        await publishReconciliationAlert(riskStreamUrl, run);
+        await publishReconciliationAlert(riskStreamUrl, run, serviceAuthToken);
       } catch {
         // Risk-stream publishing is best effort. Reconciliation result remains persisted.
       }
@@ -254,7 +286,11 @@ export async function buildServer(options: BuildServerOptions = {}) {
     return response;
   });
 
-  app.get("/reconcile/latest", async () => {
+  app.get("/reconcile/latest", async (req, reply) => {
+    if (!requireServiceAuth(req as { headers: Record<string, unknown> }, reply)) {
+      return;
+    }
+
     const response: GetLatestReconciliationResponse = {
       run: reconciliationStore.getLatestRun(),
       freezeState: reconciliationStore.getFreezeState(),
@@ -262,7 +298,11 @@ export async function buildServer(options: BuildServerOptions = {}) {
     return response;
   });
 
-  app.get("/reconcile/history", async (req) => {
+  app.get("/reconcile/history", async (req, reply) => {
+    if (!requireServiceAuth(req as { headers: Record<string, unknown> }, reply)) {
+      return;
+    }
+
     const query = req.query as { limit?: string };
     const limit = parseLimit(query.limit, DEFAULT_HISTORY_LIMIT);
     const response: ListReconciliationHistoryResponse = {
@@ -272,6 +312,10 @@ export async function buildServer(options: BuildServerOptions = {}) {
   });
 
   app.post("/freeze/unfreeze", async (req, reply) => {
+    if (!requireServiceAuth(req as { headers: Record<string, unknown> }, reply)) {
+      return;
+    }
+
     const parsed = parseManualUnfreezeRequest(req.body);
     if (!parsed) {
       return reply.code(400).send({
@@ -316,7 +360,11 @@ export async function buildServer(options: BuildServerOptions = {}) {
     return response;
   });
 
-  app.get("/freeze/overrides", async (req) => {
+  app.get("/freeze/overrides", async (req, reply) => {
+    if (!requireServiceAuth(req as { headers: Record<string, unknown> }, reply)) {
+      return;
+    }
+
     const query = req.query as { limit?: string };
     const limit = parseLimit(query.limit, DEFAULT_OVERRIDE_HISTORY_LIMIT);
     const response: ListFreezeOverridesResponse = {

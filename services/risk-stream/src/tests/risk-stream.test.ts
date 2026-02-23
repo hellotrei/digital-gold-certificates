@@ -314,3 +314,38 @@ test("returns 404 when risk profile does not exist", async () => {
     rmSync(temp.dir, { recursive: true, force: true });
   }
 });
+
+test("enforces service auth token on ingest endpoints when configured", async () => {
+  const temp = createTempDbPath();
+  const app = await buildServer({ dbPath: temp.dbPath, serviceAuthToken: "svc-secret" });
+  try {
+    const payload = {
+      event: {
+        type: "TRANSFER",
+        certId: "DGC-AUTH-RISK-1",
+        occurredAt: nowMinusMs(5 * 60 * 1000),
+        from: "0x1",
+        to: "0x2",
+        amountGram: "1.0000",
+      } satisfies LedgerEvent,
+    };
+
+    const unauthorized = await app.inject({
+      method: "POST",
+      url: "/ingest/ledger-event",
+      payload,
+    });
+    assert.equal(unauthorized.statusCode, 401);
+
+    const authorized = await app.inject({
+      method: "POST",
+      url: "/ingest/ledger-event",
+      headers: { "x-service-token": "svc-secret" },
+      payload,
+    });
+    assert.equal(authorized.statusCode, 202);
+  } finally {
+    await app.close();
+    rmSync(temp.dir, { recursive: true, force: true });
+  }
+});

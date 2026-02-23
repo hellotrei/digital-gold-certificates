@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import Fastify from "fastify";
 import {
+  buildServiceAuthHeaders,
   type AnchorProofResponse,
   type CertificateStatus,
   canonicalJson,
@@ -25,6 +26,7 @@ import {
   signHex,
   verifyHex,
 } from "@dgc/shared";
+import { isServiceAuthAuthorized, SERVICE_AUTH_HEADER } from "@dgc/shared";
 import { buildOpenApiSpec } from "./openapi.js";
 import {
   type CertificateStore,
@@ -144,6 +146,7 @@ interface BuildServerOptions {
   issuerPrivateKeyHex?: string;
   ledgerAdapterUrl?: string;
   serviceBaseUrl?: string;
+  serviceAuthToken?: string;
 }
 
 async function signCertificate(
@@ -164,15 +167,17 @@ async function tryAnchorProof(
   certId: string,
   payloadHash: string,
   occurredAt: string,
+  serviceAuthToken: string | undefined,
 ): Promise<{ proofAnchorStatus: "ANCHORED" | "SKIPPED" | "FAILED"; proof?: ProofAnchorRecord }> {
   if (!ledgerAdapterUrl) {
     return { proofAnchorStatus: "SKIPPED" };
   }
 
   try {
+    const authHeaders = buildServiceAuthHeaders(serviceAuthToken);
     const response = await fetch(`${ledgerAdapterUrl.replace(/\/$/, "")}/proofs/anchor`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { ...authHeaders, "content-type": "application/json" },
       body: JSON.stringify({ certId, payloadHash, occurredAt }),
       signal: AbortSignal.timeout(5000),
     });
@@ -191,15 +196,17 @@ async function tryAnchorProof(
 async function tryRecordLedgerEvent(
   ledgerAdapterUrl: string | undefined,
   event: LedgerEvent,
+  serviceAuthToken: string | undefined,
 ): Promise<"RECORDED" | "SKIPPED" | "FAILED"> {
   if (!ledgerAdapterUrl) {
     return "SKIPPED";
   }
 
   try {
+    const authHeaders = buildServiceAuthHeaders(serviceAuthToken);
     const response = await fetch(`${ledgerAdapterUrl.replace(/\/$/, "")}/events/record`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { ...authHeaders, "content-type": "application/json" },
       body: JSON.stringify({ event }),
       signal: AbortSignal.timeout(5000),
     });
@@ -233,10 +240,25 @@ export async function buildServer(options: BuildServerOptions = {}) {
   }
   const issuerPublicKeyHex = await publicKeyFromPrivateKeyHex(issuerPrivateKeyHex);
   const ledgerAdapterUrl = options.ledgerAdapterUrl ?? process.env.LEDGER_ADAPTER_URL;
+  const serviceAuthToken = options.serviceAuthToken ?? process.env.SERVICE_AUTH_TOKEN;
   const serviceBaseUrl =
     options.serviceBaseUrl ||
     process.env.SERVICE_BASE_URL ||
     `http://127.0.0.1:${process.env.PORT || 4101}`;
+
+  function requireServiceAuth(
+    req: { headers: Record<string, unknown> },
+    reply: { code: (statusCode: number) => { send: (payload: unknown) => void } },
+  ): boolean {
+    if (isServiceAuthAuthorized(req.headers[SERVICE_AUTH_HEADER], serviceAuthToken)) {
+      return true;
+    }
+    reply.code(401).send({
+      error: "unauthorized_service",
+      message: `Missing or invalid '${SERVICE_AUTH_HEADER}' header`,
+    });
+    return false;
+  }
 
   app.get("/health", async () => ({ ok: true, service: "certificate-service" }));
   app.get("/openapi.json", async () => buildOpenApiSpec(serviceBaseUrl));
@@ -269,17 +291,22 @@ export async function buildServer(options: BuildServerOptions = {}) {
       certificate.payload.certId,
       certificate.payloadHash,
       certificate.payload.issuedAt,
+      serviceAuthToken,
     );
 
-    const eventWriteStatus = await tryRecordLedgerEvent(ledgerAdapterUrl, {
-      type: "ISSUED",
-      certId: certificate.payload.certId,
-      occurredAt: certificate.payload.issuedAt,
-      proofHash: proofResult.proof?.proofHash,
-      owner: certificate.payload.owner,
-      amountGram: certificate.payload.amountGram,
-      purity: certificate.payload.purity,
-    });
+    const eventWriteStatus = await tryRecordLedgerEvent(
+      ledgerAdapterUrl,
+      {
+        type: "ISSUED",
+        certId: certificate.payload.certId,
+        occurredAt: certificate.payload.issuedAt,
+        proofHash: proofResult.proof?.proofHash,
+        owner: certificate.payload.owner,
+        amountGram: certificate.payload.amountGram,
+        purity: certificate.payload.purity,
+      },
+      serviceAuthToken,
+    );
 
     const response: IssueCertificateResponse = {
       certificate,
@@ -292,6 +319,10 @@ export async function buildServer(options: BuildServerOptions = {}) {
   });
 
   app.post("/certificates/transfer", async (req, reply) => {
+    if (!requireServiceAuth(req as { headers: Record<string, unknown> }, reply)) {
+      return;
+    }
+
     const parsed = parseTransferRequest(req.body);
     if (!parsed) {
       return reply.code(400).send({
@@ -330,18 +361,23 @@ export async function buildServer(options: BuildServerOptions = {}) {
       certificate.payload.certId,
       certificate.payloadHash,
       new Date().toISOString(),
+      serviceAuthToken,
     );
 
-    const eventWriteStatus = await tryRecordLedgerEvent(ledgerAdapterUrl, {
-      type: "TRANSFER",
-      certId: certificate.payload.certId,
-      occurredAt: new Date().toISOString(),
-      proofHash: proofResult.proof?.proofHash,
-      from: previousOwner,
-      to: parsed.toOwner,
-      amountGram: certificate.payload.amountGram,
-      price: parsed.price,
-    });
+    const eventWriteStatus = await tryRecordLedgerEvent(
+      ledgerAdapterUrl,
+      {
+        type: "TRANSFER",
+        certId: certificate.payload.certId,
+        occurredAt: new Date().toISOString(),
+        proofHash: proofResult.proof?.proofHash,
+        from: previousOwner,
+        to: parsed.toOwner,
+        amountGram: certificate.payload.amountGram,
+        price: parsed.price,
+      },
+      serviceAuthToken,
+    );
 
     const response: TransferCertificateResponse = {
       certificate,
@@ -354,6 +390,10 @@ export async function buildServer(options: BuildServerOptions = {}) {
   });
 
   app.post("/certificates/split", async (req, reply) => {
+    if (!requireServiceAuth(req as { headers: Record<string, unknown> }, reply)) {
+      return;
+    }
+
     const parsed = parseSplitRequest(req.body);
     if (!parsed) {
       return reply.code(400).send({
@@ -422,26 +462,32 @@ export async function buildServer(options: BuildServerOptions = {}) {
         parentCertificate.payload.certId,
         parentCertificate.payloadHash,
         nowIso,
+        serviceAuthToken,
       ),
       tryAnchorProof(
         ledgerAdapterUrl,
         childCertificate.payload.certId,
         childCertificate.payloadHash,
         nowIso,
+        serviceAuthToken,
       ),
     ]);
 
-    const eventWriteStatus = await tryRecordLedgerEvent(ledgerAdapterUrl, {
-      type: "SPLIT",
-      certId: parentCertificate.payload.certId,
-      occurredAt: nowIso,
-      proofHash: childProof.proof?.proofHash,
-      parentCertId: parentCertificate.payload.certId,
-      childCertId: childCertificate.payload.certId,
-      from: parentCurrent.payload.owner,
-      to: childCertificate.payload.owner,
-      amountChildGram: childCertificate.payload.amountGram,
-    });
+    const eventWriteStatus = await tryRecordLedgerEvent(
+      ledgerAdapterUrl,
+      {
+        type: "SPLIT",
+        certId: parentCertificate.payload.certId,
+        occurredAt: nowIso,
+        proofHash: childProof.proof?.proofHash,
+        parentCertId: parentCertificate.payload.certId,
+        childCertId: childCertificate.payload.certId,
+        from: parentCurrent.payload.owner,
+        to: childCertificate.payload.owner,
+        amountChildGram: childCertificate.payload.amountGram,
+      },
+      serviceAuthToken,
+    );
 
     const response: SplitCertificateResponse = {
       parentCertificate,
@@ -459,6 +505,10 @@ export async function buildServer(options: BuildServerOptions = {}) {
   });
 
   app.post("/certificates/status", async (req, reply) => {
+    if (!requireServiceAuth(req as { headers: Record<string, unknown> }, reply)) {
+      return;
+    }
+
     const parsed = parseStatusRequest(req.body);
     if (!parsed) {
       return reply.code(400).send({
@@ -498,15 +548,20 @@ export async function buildServer(options: BuildServerOptions = {}) {
       certificate.payload.certId,
       certificate.payloadHash,
       occurredAt,
+      serviceAuthToken,
     );
 
-    const eventWriteStatus = await tryRecordLedgerEvent(ledgerAdapterUrl, {
-      type: "STATUS_CHANGED",
-      certId: certificate.payload.certId,
-      occurredAt,
-      proofHash: proofResult.proof?.proofHash,
-      status: parsed.status,
-    });
+    const eventWriteStatus = await tryRecordLedgerEvent(
+      ledgerAdapterUrl,
+      {
+        type: "STATUS_CHANGED",
+        certId: certificate.payload.certId,
+        occurredAt,
+        proofHash: proofResult.proof?.proofHash,
+        status: parsed.status,
+      },
+      serviceAuthToken,
+    );
 
     const response: ChangeCertificateStatusResponse = {
       certificate,
@@ -558,9 +613,13 @@ export async function buildServer(options: BuildServerOptions = {}) {
     }
 
     try {
+      const authHeaders = buildServiceAuthHeaders(serviceAuthToken);
       const response = await fetch(
         `${ledgerAdapterUrl.replace(/\/$/, "")}/events/${encodeURIComponent(params.certId)}`,
-        { signal: AbortSignal.timeout(5000) },
+        {
+          headers: authHeaders,
+          signal: AbortSignal.timeout(5000),
+        },
       );
 
       if (response.status === 404) {
