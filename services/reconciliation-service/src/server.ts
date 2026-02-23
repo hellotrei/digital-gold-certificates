@@ -16,8 +16,14 @@ import type {
   SignedCertificate,
 } from "@dgc/shared";
 import {
+  GOVERNANCE_ACTOR_HEADER,
+  GOVERNANCE_ROLE_HEADER,
   buildServiceAuthHeaders,
+  isGovernanceRoleAllowed,
   isServiceAuthAuthorized,
+  parseGovernanceActorHeader,
+  parseGovernanceRoleHeader,
+  parseGovernanceRoleSet,
   SERVICE_AUTH_HEADER,
 } from "@dgc/shared";
 import { SqliteReconciliationStore, type ReconciliationStore } from "./storage/reconciliation-store.js";
@@ -28,6 +34,7 @@ const DEFAULT_CUSTODY_TOTAL_GRAM = "0.0000";
 const DEFAULT_MISMATCH_THRESHOLD_GRAM = "0.5000";
 const DEFAULT_HISTORY_LIMIT = 20;
 const DEFAULT_OVERRIDE_HISTORY_LIMIT = 20;
+const DEFAULT_UNFREEZE_ALLOWED_ROLES = ["ops_admin", "admin"];
 const AMOUNT_SCALE = 10000n;
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -184,6 +191,7 @@ interface BuildServerOptions {
   custodyTotalGram?: string;
   mismatchThresholdGram?: string;
   serviceAuthToken?: string;
+  unfreezeAllowedRoles?: string[];
 }
 
 export async function buildServer(options: BuildServerOptions = {}) {
@@ -200,6 +208,10 @@ export async function buildServer(options: BuildServerOptions = {}) {
     DEFAULT_CERTIFICATE_SERVICE_URL;
   const riskStreamUrl = options.riskStreamUrl ?? process.env.RISK_STREAM_URL;
   const serviceAuthToken = options.serviceAuthToken ?? process.env.SERVICE_AUTH_TOKEN;
+  const unfreezeAllowedRoles = parseGovernanceRoleSet(
+    process.env.RECON_UNFREEZE_ALLOWED_ROLES,
+    options.unfreezeAllowedRoles || DEFAULT_UNFREEZE_ALLOWED_ROLES,
+  );
   const configuredCustodyTotalGram =
     options.custodyTotalGram || process.env.CUSTODY_TOTAL_GRAM || DEFAULT_CUSTODY_TOTAL_GRAM;
   const configuredMismatchThresholdGram =
@@ -221,6 +233,24 @@ export async function buildServer(options: BuildServerOptions = {}) {
       message: `Missing or invalid '${SERVICE_AUTH_HEADER}' header`,
     });
     return false;
+  }
+
+  function requireGovernanceRole(
+    req: { headers: Record<string, unknown> },
+    reply: { code: (statusCode: number) => { send: (payload: unknown) => void } },
+    allowedRoles: Set<string>,
+  ): { actorHeader: string | null } | null {
+    const role = parseGovernanceRoleHeader(req.headers[GOVERNANCE_ROLE_HEADER]);
+    if (!isGovernanceRoleAllowed(role, allowedRoles)) {
+      reply.code(403).send({
+        error: "governance_forbidden",
+        message: `Role in '${GOVERNANCE_ROLE_HEADER}' is not allowed`,
+      });
+      return null;
+    }
+    return {
+      actorHeader: parseGovernanceActorHeader(req.headers[GOVERNANCE_ACTOR_HEADER]),
+    };
   }
 
   app.get("/health", async () => ({ ok: true, service: "reconciliation-service" }));
@@ -315,12 +345,26 @@ export async function buildServer(options: BuildServerOptions = {}) {
     if (!requireServiceAuth(req as { headers: Record<string, unknown> }, reply)) {
       return;
     }
+    const governance = requireGovernanceRole(
+      req as { headers: Record<string, unknown> },
+      reply,
+      unfreezeAllowedRoles,
+    );
+    if (!governance) {
+      return;
+    }
 
     const parsed = parseManualUnfreezeRequest(req.body);
     if (!parsed) {
       return reply.code(400).send({
         error: "invalid_request",
         message: "Expected actor and reason",
+      });
+    }
+    if (governance.actorHeader && governance.actorHeader !== parsed.actor) {
+      return reply.code(409).send({
+        error: "actor_mismatch",
+        message: "Header actor must match actor field",
       });
     }
 

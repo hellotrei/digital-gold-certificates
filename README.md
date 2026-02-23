@@ -83,9 +83,27 @@ Run tests:
 pnpm -C contracts test
 ```
 
-## Milestone 11 (Current)
+## Milestone 12 (Current)
 
-Milestone 11 adds dispute orchestration and governance controls:
+Milestone 12 adds governance RBAC hardening:
+- Governance role headers:
+  - `x-governance-role`
+  - `x-governance-actor` (optional but recommended for actor consistency checks)
+- `dispute-service` RBAC:
+  - `POST /disputes/:disputeId/assign` requires allowed governance role
+    - payload now includes `assignedBy` and `assignee`
+  - `POST /disputes/:disputeId/resolve` requires allowed governance role
+    - payload uses `resolvedBy` + resolution fields
+  - role config via:
+    - `DISPUTE_ASSIGN_ALLOWED_ROLES` (default: `ops_admin,ops_agent,admin`)
+    - `DISPUTE_RESOLVE_ALLOWED_ROLES` (default: `ops_admin,ops_lead,admin`)
+- `reconciliation-service` RBAC:
+  - `POST /freeze/unfreeze` requires allowed governance role
+  - role config via `RECON_UNFREEZE_ALLOWED_ROLES` (default: `ops_admin,admin`)
+- Additional actor consistency guard:
+  - if `x-governance-actor` is set, it must match body actor field (`assignedBy`/`resolvedBy`/`actor`)
+
+Milestone 11 dispute orchestration remains active:
 - `dispute-service` with SQLite persistence (`DISPUTE_DB_PATH`)
 - Dispute lifecycle endpoints:
   - `POST /disputes/open`
@@ -167,7 +185,22 @@ Milestone 6 marketplace hardening remains active:
   - `ISSUER_PRIVATE_KEY_HEX` must be set for `certificate-service`
   - `CHAIN_PRIVATE_KEY` must be set when `DGC_REGISTRY_ADDRESS` is enabled in `ledger-adapter`
 
-## Run Milestone 11 On Localhost (With Local Chain)
+## Milestone History (1 -> Current)
+
+- Milestone 1: certificate issue/verify foundation
+- Milestone 2: SQLite persistence + proof anchoring
+- Milestone 3: transfer, split, status change, timeline flow
+- Milestone 4: local-chain ledger integration
+- Milestone 5: marketplace escrow flow
+- Milestone 6: persistence hardening, idempotency, env key hardening
+- Milestone 7: risk-stream scoring MVP
+- Milestone 8: web-verifier risk view
+- Milestone 9: risk summary + alerting
+- Milestone 10: reconciliation + freeze enforcement
+- Milestone 11: dispute service + marketplace dispute integration + verifier panels
+- Milestone 12 (current): inter-service auth token + governance RBAC enforcement
+
+## Run Milestone 12 On Localhost (With Local Chain)
 
 If `pnpm` is not installed globally, use `corepack pnpm`.
 
@@ -284,6 +317,13 @@ If `SERVICE_AUTH_TOKEN` is enabled, include this header for protected endpoints:
 -H "x-service-token: $SERVICE_AUTH_TOKEN"
 ```
 
+Governance-protected endpoints also require governance headers:
+
+```bash
+-H "x-governance-role: ops_admin"
+-H "x-governance-actor: ops-admin"
+```
+
 Check chain connectivity from ledger-adapter:
 
 ```bash
@@ -294,6 +334,7 @@ Trigger reconciliation run:
 
 ```bash
 curl -X POST http://127.0.0.1:4105/reconcile/run \
+  -H "x-service-token: $SERVICE_AUTH_TOKEN" \
   -H "content-type: application/json" \
   -d '{"inventoryTotalGram":"10.0000"}'
 ```
@@ -301,13 +342,17 @@ curl -X POST http://127.0.0.1:4105/reconcile/run \
 Fetch latest reconciliation + freeze state:
 
 ```bash
-curl http://127.0.0.1:4105/reconcile/latest
+curl http://127.0.0.1:4105/reconcile/latest \
+  -H "x-service-token: $SERVICE_AUTH_TOKEN"
 ```
 
 Manual unfreeze override with audit trail:
 
 ```bash
 curl -X POST http://127.0.0.1:4105/freeze/unfreeze \
+  -H "x-service-token: $SERVICE_AUTH_TOKEN" \
+  -H "x-governance-role: ops_admin" \
+  -H "x-governance-actor: ops-admin" \
   -H "content-type: application/json" \
   -d '{"actor":"ops-admin","reason":"false_positive"}'
 ```
@@ -315,7 +360,8 @@ curl -X POST http://127.0.0.1:4105/freeze/unfreeze \
 List freeze override history:
 
 ```bash
-curl http://127.0.0.1:4105/freeze/overrides?limit=10
+curl http://127.0.0.1:4105/freeze/overrides?limit=10 \
+  -H "x-service-token: $SERVICE_AUTH_TOKEN"
 ```
 
 Issue certificate:

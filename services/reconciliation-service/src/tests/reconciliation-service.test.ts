@@ -267,6 +267,10 @@ test("manual unfreeze writes override audit history", async () => {
     const unfreezeRes = await app.inject({
       method: "POST",
       url: "/freeze/unfreeze",
+      headers: {
+        "x-governance-role": "ops_admin",
+        "x-governance-actor": "ops-admin-1",
+      },
       payload: {
         actor: "ops-admin-1",
         reason: "false_positive_reconciliation",
@@ -295,6 +299,10 @@ test("manual unfreeze writes override audit history", async () => {
     const unfreezeAgain = await app.inject({
       method: "POST",
       url: "/freeze/unfreeze",
+      headers: {
+        "x-governance-role": "ops_admin",
+        "x-governance-actor": "ops-admin-1",
+      },
       payload: {
         actor: "ops-admin-1",
         reason: "should_fail",
@@ -357,6 +365,21 @@ test("enforces service auth token on reconcile endpoints and outbound calls", as
       headers: { "x-service-token": serviceToken },
     });
     assert.equal(latestAuthorized.statusCode, 200);
+
+    const unauthorizedUnfreeze = await app.inject({
+      method: "POST",
+      url: "/freeze/unfreeze",
+      headers: {
+        "x-service-token": serviceToken,
+        "x-governance-role": "viewer",
+        "x-governance-actor": "ops-admin-1",
+      },
+      payload: {
+        actor: "ops-admin-1",
+        reason: "unauthorized_role_test",
+      },
+    });
+    assert.equal(unauthorizedUnfreeze.statusCode, 403);
   } finally {
     await app.close();
     await closeServer(certificateMock);

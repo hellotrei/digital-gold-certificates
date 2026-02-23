@@ -57,7 +57,11 @@ test("opens, assigns, resolves, gets and lists disputes", async () => {
     const assignRes = await app.inject({
       method: "POST",
       url: `/disputes/${encodeURIComponent(disputeId)}/assign`,
-      payload: { assignee: "ops-analyst-1" },
+      headers: {
+        "x-governance-role": "ops_admin",
+        "x-governance-actor": "ops-admin-1",
+      },
+      payload: { assignedBy: "ops-admin-1", assignee: "ops-analyst-1" },
     });
     assert.equal(assignRes.statusCode, 200);
     const assignBody = assignRes.json() as {
@@ -69,6 +73,10 @@ test("opens, assigns, resolves, gets and lists disputes", async () => {
     const resolveRes = await app.inject({
       method: "POST",
       url: `/disputes/${encodeURIComponent(disputeId)}/resolve`,
+      headers: {
+        "x-governance-role": "ops_lead",
+        "x-governance-actor": "ops-lead-1",
+      },
       payload: {
         resolvedBy: "ops-lead-1",
         resolution: "REFUND_BUYER",
@@ -103,7 +111,11 @@ test("opens, assigns, resolves, gets and lists disputes", async () => {
     const assignResolvedRes = await app.inject({
       method: "POST",
       url: `/disputes/${encodeURIComponent(disputeId)}/assign`,
-      payload: { assignee: "ops-analyst-2" },
+      headers: {
+        "x-governance-role": "ops_admin",
+        "x-governance-actor": "ops-admin-2",
+      },
+      payload: { assignedBy: "ops-admin-2", assignee: "ops-analyst-2" },
     });
     assert.equal(assignResolvedRes.statusCode, 409);
   } finally {
@@ -137,6 +149,27 @@ test("enforces service auth token on write endpoints when configured", async () 
       payload,
     });
     assert.equal(authorized.statusCode, 201);
+
+    const disputeId = authorized.json().dispute.disputeId as string;
+    const missingGovernance = await app.inject({
+      method: "POST",
+      url: `/disputes/${encodeURIComponent(disputeId)}/assign`,
+      headers: { "x-service-token": "svc-secret" },
+      payload: { assignedBy: "ops-admin-1", assignee: "ops-analyst-1" },
+    });
+    assert.equal(missingGovernance.statusCode, 403);
+
+    const governanceOk = await app.inject({
+      method: "POST",
+      url: `/disputes/${encodeURIComponent(disputeId)}/assign`,
+      headers: {
+        "x-service-token": "svc-secret",
+        "x-governance-role": "ops_admin",
+        "x-governance-actor": "ops-admin-1",
+      },
+      payload: { assignedBy: "ops-admin-1", assignee: "ops-analyst-1" },
+    });
+    assert.equal(governanceOk.statusCode, 200);
   } finally {
     await app.close();
     rmSync(temp.dir, { recursive: true, force: true });

@@ -376,6 +376,7 @@ export interface DisputeRecord {
   reason: string;
   evidence?: Record<string, unknown>;
   openedAt: string;
+  assignedBy?: string;
   assignedTo?: string;
   assignedAt?: string;
   resolvedBy?: string;
@@ -397,6 +398,7 @@ export interface OpenDisputeResponse {
 }
 
 export interface AssignDisputeRequest {
+  assignedBy: string;
   assignee: string;
 }
 

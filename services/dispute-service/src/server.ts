@@ -13,10 +13,21 @@ import type {
   ResolveDisputeRequest,
   ResolveDisputeResponse,
 } from "@dgc/shared";
-import { isServiceAuthAuthorized, SERVICE_AUTH_HEADER } from "@dgc/shared";
+import {
+  GOVERNANCE_ACTOR_HEADER,
+  GOVERNANCE_ROLE_HEADER,
+  isGovernanceRoleAllowed,
+  isServiceAuthAuthorized,
+  parseGovernanceActorHeader,
+  parseGovernanceRoleHeader,
+  parseGovernanceRoleSet,
+  SERVICE_AUTH_HEADER,
+} from "@dgc/shared";
 import { SqliteDisputeStore, type DisputeStore } from "./storage/dispute-store.js";
 
 const DEFAULT_DISPUTE_DB_PATH = "data/dispute-service.db";
+const DEFAULT_ASSIGN_ALLOWED_ROLES = ["ops_admin", "ops_agent", "admin"];
+const DEFAULT_RESOLVE_ALLOWED_ROLES = ["ops_admin", "ops_lead", "admin"];
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -52,8 +63,9 @@ function parseOpenDisputeRequest(body: unknown): OpenDisputeRequest | null {
 
 function parseAssignDisputeRequest(body: unknown): AssignDisputeRequest | null {
   if (!isObject(body)) return null;
+  if (!isNonEmptyString(body.assignedBy)) return null;
   if (!isNonEmptyString(body.assignee)) return null;
-  return { assignee: body.assignee };
+  return { assignedBy: body.assignedBy, assignee: body.assignee };
 }
 
 function parseResolveDisputeRequest(body: unknown): ResolveDisputeRequest | null {
@@ -76,6 +88,8 @@ interface BuildServerOptions {
   disputeStore?: DisputeStore;
   dbPath?: string;
   serviceAuthToken?: string;
+  assignAllowedRoles?: string[];
+  resolveAllowedRoles?: string[];
 }
 
 export async function buildServer(options: BuildServerOptions = {}) {
@@ -85,6 +99,14 @@ export async function buildServer(options: BuildServerOptions = {}) {
     new SqliteDisputeStore(options.dbPath || process.env.DISPUTE_DB_PATH || DEFAULT_DISPUTE_DB_PATH);
   const ownStore = !options.disputeStore;
   const serviceAuthToken = options.serviceAuthToken ?? process.env.SERVICE_AUTH_TOKEN;
+  const assignAllowedRoles = parseGovernanceRoleSet(
+    process.env.DISPUTE_ASSIGN_ALLOWED_ROLES,
+    options.assignAllowedRoles || DEFAULT_ASSIGN_ALLOWED_ROLES,
+  );
+  const resolveAllowedRoles = parseGovernanceRoleSet(
+    process.env.DISPUTE_RESOLVE_ALLOWED_ROLES,
+    options.resolveAllowedRoles || DEFAULT_RESOLVE_ALLOWED_ROLES,
+  );
 
   function requireServiceAuth(
     req: { headers: Record<string, unknown> },
@@ -98,6 +120,24 @@ export async function buildServer(options: BuildServerOptions = {}) {
       message: `Missing or invalid '${SERVICE_AUTH_HEADER}' header`,
     });
     return false;
+  }
+
+  function requireGovernanceRole(
+    req: { headers: Record<string, unknown> },
+    reply: { code: (statusCode: number) => { send: (payload: unknown) => void } },
+    allowedRoles: Set<string>,
+  ): { actorHeader: string | null } | null {
+    const role = parseGovernanceRoleHeader(req.headers[GOVERNANCE_ROLE_HEADER]);
+    if (!isGovernanceRoleAllowed(role, allowedRoles)) {
+      reply.code(403).send({
+        error: "governance_forbidden",
+        message: `Role in '${GOVERNANCE_ROLE_HEADER}' is not allowed`,
+      });
+      return null;
+    }
+    return {
+      actorHeader: parseGovernanceActorHeader(req.headers[GOVERNANCE_ACTOR_HEADER]),
+    };
   }
 
   app.get("/health", async () => ({ ok: true, service: "dispute-service" }));
@@ -135,13 +175,27 @@ export async function buildServer(options: BuildServerOptions = {}) {
     if (!requireServiceAuth(req as { headers: Record<string, unknown> }, reply)) {
       return;
     }
+    const governance = requireGovernanceRole(
+      req as { headers: Record<string, unknown> },
+      reply,
+      assignAllowedRoles,
+    );
+    if (!governance) {
+      return;
+    }
 
     const params = req.params as { disputeId?: string };
     const parsed = parseAssignDisputeRequest(req.body);
     if (!isNonEmptyString(params.disputeId) || !parsed) {
       return reply.code(400).send({
         error: "invalid_request",
-        message: "Expected disputeId param and assignee field",
+        message: "Expected disputeId param, assignedBy, and assignee field",
+      });
+    }
+    if (governance.actorHeader && governance.actorHeader !== parsed.assignedBy) {
+      return reply.code(409).send({
+        error: "actor_mismatch",
+        message: "Header actor must match assignedBy",
       });
     }
 
@@ -159,6 +213,7 @@ export async function buildServer(options: BuildServerOptions = {}) {
     const updated: DisputeRecord = {
       ...current,
       status: "ASSIGNED",
+      assignedBy: parsed.assignedBy,
       assignedTo: parsed.assignee,
       assignedAt: new Date().toISOString(),
     };
@@ -171,6 +226,14 @@ export async function buildServer(options: BuildServerOptions = {}) {
     if (!requireServiceAuth(req as { headers: Record<string, unknown> }, reply)) {
       return;
     }
+    const governance = requireGovernanceRole(
+      req as { headers: Record<string, unknown> },
+      reply,
+      resolveAllowedRoles,
+    );
+    if (!governance) {
+      return;
+    }
 
     const params = req.params as { disputeId?: string };
     const parsed = parseResolveDisputeRequest(req.body);
@@ -178,6 +241,12 @@ export async function buildServer(options: BuildServerOptions = {}) {
       return reply.code(400).send({
         error: "invalid_request",
         message: "Expected disputeId param, resolvedBy, resolution and optional resolutionNotes",
+      });
+    }
+    if (governance.actorHeader && governance.actorHeader !== parsed.resolvedBy) {
+      return reply.code(409).send({
+        error: "actor_mismatch",
+        message: "Header actor must match resolvedBy",
       });
     }
 
